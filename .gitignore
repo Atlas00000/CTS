@@ -1,0 +1,3 @@
+# Build / local tester output
+*.ex5
+*.log
