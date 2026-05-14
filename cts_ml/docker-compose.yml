@@ -1,0 +1,25 @@
+# Phase 2 Week 4 — PostgreSQL for CTS CSV → ML pipeline (see AI_integration.md §4.3b).
+# Usage: copy .env.example to .env, adjust secrets, then from this directory:
+#   docker compose up -d
+#
+# Bind to loopback only (host tools / Python on same machine).
+
+services:
+  postgres:
+    image: postgres:16.6-bookworm
+    container_name: cts_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cts_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_local_only}
+      POSTGRES_DB: ${POSTGRES_DB:-ctsdb}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - cts_pgdata:/var/lib/postgresql/data
+      # Runs *.sql in sort order on first empty PGDATA only (see README to re-apply on old volumes).
+      - ./sql/migrations:/docker-entrypoint-initdb.d:ro
+
+volumes:
+  cts_pgdata:
+    name: cts_pgdata

@@ -138,9 +138,13 @@ inline bool CTS_OpenMarket(CTrade &trade, const string sym, const long magic,
                            const double volume,
                            const double sl, const double tp,
                            const bool verbose,
-                           string &err)
+                           string &err,
+                           ulong &out_deal_ticket,
+                           int &out_retcode)
   {
    err = "";
+   out_deal_ticket = 0;
+   out_retcode = 0;
    trade.SetExpertMagicNumber((ulong)magic);
    trade.SetDeviationInPoints(deviation_points);
    CTS_SetFilling(trade, sym);
@@ -151,11 +155,17 @@ inline bool CTS_OpenMarket(CTrade &trade, const string sym, const long magic,
 
    if(!ok)
      {
+      out_retcode = (int)trade.ResultRetcode();
       err = StringFormat("OrderSend failed: retcode=%d %s",
-                         (int)trade.ResultRetcode(), trade.ResultRetcodeDescription());
+                         out_retcode, trade.ResultRetcodeDescription());
       Print("CTS: ", err);
       return false;
      }
+
+   out_retcode = (int)trade.ResultRetcode();
+   out_deal_ticket = trade.ResultDeal();
+   if(out_deal_ticket == 0)
+      out_deal_ticket = trade.ResultOrder();
 
    CTS_LogV(verbose, StringFormat("CTS: %s opened vol=%.2f SL=%.5f TP=%.5f",
                                   is_buy ? "BUY" : "SELL", volume, sl, tp));

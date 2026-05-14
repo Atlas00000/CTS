@@ -6,6 +6,16 @@
 
 #include "CTS_Indicators.mqh"
 
+inline bool CTS_SignalBiasLong(const CTSPriceBuf &b)
+  {
+   return (b.close1 > b.ema200_1) && (b.ema50_1 > b.ema200_1);
+  }
+
+inline bool CTS_SignalBiasShort(const CTSPriceBuf &b)
+  {
+   return (b.close1 < b.ema200_1) && (b.ema50_1 < b.ema200_1);
+  }
+
 inline bool CTS_ShouldEnterLong(const CTSPriceBuf &b, string &why_not)
   {
    why_not = "";

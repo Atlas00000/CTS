@@ -1,3 +1,10 @@
 # Build / local tester output
 *.ex5
 *.log
+__pycache__/
+*.pyc
+
+# Local secrets (Docker Compose, future Python DSN)
+.env
+cts_ml/.env
+configs/.env

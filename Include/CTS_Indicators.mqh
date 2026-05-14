@@ -11,7 +11,7 @@ static int g_cts_h_atr = INVALID_HANDLE;
 
 struct CTSPriceBuf
   {
-   double            close1;
+   double            open1, high1, low1, close1;
    double            ema50_1, ema50_2;
    double            ema200_1, ema200_2;
    double            macd_main1, macd_main2;
@@ -80,6 +80,19 @@ inline bool CTS_FetchSignalBarData(const string sym, const ENUM_TIMEFRAMES tf,
       return false;
      }
    b.close1 = c[1];
+
+   double o[], h[], l[];
+   ArraySetAsSeries(o, true);
+   ArraySetAsSeries(h, true);
+   ArraySetAsSeries(l, true);
+   if(CopyOpen(sym, tf, 0, 3, o) < 3 || CopyHigh(sym, tf, 0, 3, h) < 3 || CopyLow(sym, tf, 0, 3, l) < 3)
+     {
+      err = "CopyOpen/High/Low failed";
+      return false;
+     }
+   b.open1 = o[1];
+   b.high1 = h[1];
+   b.low1 = l[1];
 
    double e50[];
    double e200[];

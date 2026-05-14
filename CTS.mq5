@@ -4,12 +4,13 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026"
 #property link      ""
-#property version   "1.01"
+#property version   "1.05"
 
 #include <Trade/Trade.mqh>
 
 #include "Include/CTS_Config.mqh"
 #include "Include/CTS_Log.mqh"
+#include "Include/CTS_LogCsv.mqh"
 #include "Include/CTS_State.mqh"
 #include "Include/CTS_Risk.mqh"
 #include "Include/CTS_Signals.mqh"
@@ -53,6 +54,16 @@ input ENUM_CTS_TRADE_DIR InpTradeDirection      = CTS_DIR_BOTH;
 input bool              InpOnePositionPerDir  = false;
 input bool              InpOnePositionTotal     = true;
 input double            InpMinEquity           = 0.0;
+
+input group "Logging (Phase 2)"
+input bool              InpLogCsvEnable        = false;
+input bool              InpLogCsvTestRow       = true;
+input string            InpLogCsvSubdir        = "CTS_logs";
+input bool              InpLogSignals          = true;   // Week 2+: signal rows
+input bool              InpLogOrders           = false;  // Week 3+: execution rows
+input bool              InpLogInTester         = false;  // Week 3: allow CSV in Strategy Tester (else no file I/O)
+input int               InpLogTesterMaxRows    = 50000;  // Week 3: tester row cap (signals+executions); 0 = unlimited
+input string            InpLogTesterSubdir     = "CTS_logs_tester";
 
 input group "Debug"
 input bool              InpVerboseLog          = true;
@@ -148,11 +159,33 @@ bool CTS_ValidateInputs(string &err)
          return false;
         }
      }
+   if(InpLogCsvEnable)
+     {
+      string sd = InpLogCsvSubdir;
+      string le = "";
+      if(!CTS_LogCsv_SanitizeSubdir(sd, le))
+        {
+         err = le;
+         return false;
+        }
+      string tsd = InpLogTesterSubdir;
+      if(!CTS_LogCsv_SanitizeSubdir(tsd, le))
+        {
+         err = le;
+         return false;
+        }
+      if(InpLogTesterMaxRows < 0)
+        {
+         err = "Log CSV: tester max rows must be >= 0 (0 = no cap)";
+         return false;
+        }
+     }
    return true;
   }
 
 //+------------------------------------------------------------------+
-bool CTS_TryOpen(const bool is_long, const CTSPriceBuf &buf, const string sym, const ENUM_TIMEFRAMES tf)
+bool CTS_TryOpen(const bool is_long, const CTSPriceBuf &buf, const string sym, const ENUM_TIMEFRAMES tf,
+                 const string signal_id)
   {
    string reason = "";
    if(!CTS_CooldownOk(sym, tf, InpCooldownBars, InpCooldownMinutes, InpVerboseLog, reason))
@@ -207,8 +240,19 @@ bool CTS_TryOpen(const bool is_long, const CTSPriceBuf &buf, const string sym, c
      }
 
    string send_err = "";
-   if(!CTS_OpenMarket(g_trade, sym, InpMagic, InpSlippagePoints, is_long, lots, sl, tp, InpVerboseLog, send_err))
+   ulong deal_ticket = 0;
+   int send_retcode = 0;
+   if(!CTS_OpenMarket(g_trade, sym, InpMagic, InpSlippagePoints, is_long, lots, sl, tp, InpVerboseLog, send_err,
+                      deal_ticket, send_retcode))
       return false;
+
+   string exec_err = "";
+   if(!CTS_LogCsv_AppendExecutionRow(InpLogCsvEnable, InpLogOrders, sym, tf, signal_id, is_long, lots, sl, tp,
+                                     send_retcode, deal_ticket, InpVerboseLog, exec_err))
+     {
+      if(StringLen(exec_err) > 0)
+         Print("CTS: LogCsv execution row: ", exec_err);
+     }
 
    CTS_State_OnEntryOpened(sym, tf);
    return true;
@@ -234,6 +278,17 @@ int OnInit()
      }
 
    CTS_State_ResetBarDetector();
+
+   string log_err = "";
+   string eff_sub = InpLogCsvSubdir;
+   if(MQLInfoInteger(MQL_TESTER) != 0 && InpLogInTester)
+      eff_sub = InpLogTesterSubdir;
+   if(!CTS_LogCsv_Week1Init(InpLogCsvEnable, InpLogCsvTestRow, eff_sub, InpLogInTester, InpLogTesterMaxRows,
+                            InpLogOrders, sym, tf, InpVerboseLog, log_err))
+     {
+      Print("CTS: LogCsv init skipped/failed: ", log_err, " (trading continues)");
+     }
+
    PrintFormat("CTS: initialized sym=%s tf=%s", sym, EnumToString(tf));
    return INIT_SUCCEEDED;
   }
@@ -241,6 +296,7 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
   {
+   CTS_LogCsv_Close();
    CTS_IndicatorsDeinit();
   }
 
@@ -265,6 +321,26 @@ void OnTick()
    const bool sig_long = CTS_ShouldEnterLong(buf, wl);
    const bool sig_short = CTS_ShouldEnterShort(buf, ws);
 
+   const bool bias_long = CTS_SignalBiasLong(buf);
+   const bool bias_short = CTS_SignalBiasShort(buf);
+   string skip_log = "";
+   if(sig_long && sig_short)
+      skip_log = "both_signals";
+   else if(!sig_long && !sig_short)
+      skip_log = "L:" + wl + "|S:" + ws;
+   const bool would_trade = (sig_long && !sig_short) || (!sig_long && sig_short);
+
+   const string signal_id = CTS_LogCsv_MakeSignalId(sym, tf);
+
+   string csv_err = "";
+   if(!CTS_LogCsv_AppendSignalRow(InpLogCsvEnable, InpLogSignals, sym, tf, buf,
+                                  bias_long, bias_short, sig_long, sig_short, skip_log, would_trade,
+                                  InpVerboseLog, csv_err))
+     {
+      if(StringLen(csv_err) > 0)
+         Print("CTS: LogCsv append: ", csv_err);
+     }
+
    if(sig_long && sig_short)
      {
       Print("CTS: both signals on same bar — skip");
@@ -274,14 +350,14 @@ void OnTick()
    if(sig_long)
      {
       CTS_LogV(InpVerboseLog, "CTS: LONG signal");
-      CTS_TryOpen(true, buf, sym, tf);
+      CTS_TryOpen(true, buf, sym, tf, signal_id);
       return;
      }
 
    if(sig_short)
      {
       CTS_LogV(InpVerboseLog, "CTS: SHORT signal");
-      CTS_TryOpen(false, buf, sym, tf);
+      CTS_TryOpen(false, buf, sym, tf, signal_id);
       return;
      }
 
