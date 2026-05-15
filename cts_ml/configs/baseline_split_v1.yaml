@@ -1,0 +1,8 @@
+# Phase 3 Week 3 — frozen temporal split (index-based after sort by ts_gmt).
+# Re-tune when the Parquet row count or time span changes materially.
+# Regenerate: python scripts/train_baseline.py --dataset data/your.parquet --auto-split 0.7 --write-split-config configs/baseline_split_v1.yaml
+version: 1
+mode: by_index
+sort_by: ts_gmt
+train_row_end_exclusive: 32
+purge_hours: 0

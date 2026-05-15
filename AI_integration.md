@@ -144,7 +144,7 @@ Suggested columns (extend later with a `schema_version` column):
 ### 4.3 Implementation notes (MQL5)
 
 - New module: e.g. `Include/CTS_LogCsv.mqh` (or extend `CTS_Log.mqh` if small).
-- **File location:** `MQL5/Files/` under terminal data path; subfolder `CTS_logs/`.
+- **File location:** `MQL5/Files/<subdir>/` relative to the **active sandbox**: **live/visual** → `MetaQuotes/Terminal/<id>/MQL5/Files/` (default subdir `CTS_logs`); **Strategy Tester** → `MetaQuotes/Tester/<id>/Agent-*/MQL5/Files/` (when `InpLogInTester`, default subdir `CTS_logs_tester`). See `cts_ml/README.md` §EA CSV output.
 - **Input group:** `InpLogCsv`, path prefix, flush interval, `InpLogSignals` / `InpLogOrders` toggles.
 - **Tester:** If `MQLInfoInteger(MQL_TESTER)` is true, default logging **OFF** or to a dedicated tester subfolder with size cap—avoid huge optimizations.
 - **Threading:** MQL5 is single-threaded; use `FileOpen` with `FILE_TXT|FILE_READ|FILE_WRITE|FILE_ANSI` (see **§11.3**); append via `FileSeek(..., SEEK_END)` for same-day file; periodic flush / flush on `OnDeinit`.
@@ -200,9 +200,22 @@ Work **in order**; each week should end with something you can **demo or verify*
 
 ### 5.4 Phase 3 exit criteria
 
-- [ ] Reproducible training script + pinned **`requirements.txt`** (include **Postgres client** + **pandas**/**polars** + **sklearn** + chosen **XGBoost or LightGBM**).
-- [ ] Out-of-sample metrics documented; no claim of live profitability without forward test.
-- [ ] Exported artifact + **inference snippet** that loads the model and scores one row (used by Phase 4).
+- [x] Reproducible training script + pinned **`requirements.txt`** (include **Postgres client** + **pandas**/**polars** + **sklearn** + chosen **XGBoost or LightGBM**).
+- [x] Out-of-sample metrics documented; no claim of live profitability without forward test.
+- [x] Exported artifact + **inference snippet** that loads the model and scores one row (used by Phase 4).
+
+### 5.5 Weekly implementation plan (Phase 3 — offline ML)
+
+Work **in order**; each week should end with something you can **demo** (script runs, metrics file, or exported artifact). Merge weeks if your schedule is tight—do **not** skip exit checks in §5.4.
+
+| Week | Focus | Deliverables | Exit (that week) |
+|------|--------|--------------|------------------|
+| **1** | **Label + join spec** | Repo: **`cts_ml/labeling.md`** + **`cts_ml/sql/examples/join_signals_orders_example.sql`** — **label** (`has_fill` vs future +1R and `entry_price` bump), **horizon**, **entry reference**, **partial fills** / **missing deals**. | Edit `params` in the example SQL; query returns the chosen `signal_id` row with **`has_fill`**; spec has no ambiguous default label. |
+| **2** | **Dataset build** | **`cts_ml/scripts/build_dataset.py`**: Postgres **`cts_signals` ⟕ `cts_orders`**, label **`y_has_fill`**, default **`would_trade = true`**; **Parquet** or **CSV** under **`cts_ml/data/`** (gitignored); **QC** (nulls, OHLC, dup `signal_id`). | `python scripts/build_dataset.py --dry-run` then default write; row count vs `SELECT COUNT(*) FROM cts_signals WHERE would_trade` matches stderr summary. |
+| **3** | **Walk-forward + baseline** | **`cts_ml/scripts/train_baseline.py`**: sort **`ts_gmt`**; split **`configs/baseline_split_v1.yaml`** (by row index after sort) + optional **`purge_hours`**; **`RandomForestClassifier`** or **`LogisticRegression`**; metrics **PR-AUC**, **Brier**, **log_loss** on train vs validation; **`--write-split-config`** to re-freeze YAML. | `python scripts/train_baseline.py` on current Parquet prints JSON; validation metrics finite; split YAML committed / updated when row count changes. |
+| **4** | **Primary booster** | **`cts_ml/scripts/train_booster.py`**: **XGBoost** (fixed hyperparams + `scale_pos_weight`); same split as Week 3; **RF reference** on validation; **calibration CSV** (`calibration_curve`); **bucket** stats (`symbol`, **ATR quartiles**); artifacts **`*_metrics.json`**, **`*_calibration_val.csv`**, **`*_xgb.joblib`**. Shared split/features: **`scripts/ml_common.py`**. | `python scripts/train_booster.py` completes; JSON reports `comparison` vs RF; calibration + model files exist. “Beats baseline” is **informational** on small `n`. |
+| **5** | **Export + handoff** | **`scripts/export_phase3_bundle.py`**: **`model.joblib`** + **`manifest.json`** (features, label ref, versions); optional metrics/calibration → **`cts_ml/exports/phase3_v1/`** (gitignored). **`scripts/inference_score_row.py`**: score one row via **`--row-json`** or **`--from-parquet`**. **`requirements.txt`** pinned tighter + **`joblib`**. Native joblib path only (no ONNX). | Export + inference run; Phase 4 loads **`exports/phase3_v1/model.joblib`**. |
+| **6** *(optional)* | **Regime helper** | **`scripts/regime_rules.py`**: **`regime_rule_v1`** (`trend_long` / `trend_short` / `chop`) from logged EMA/MACD/bias. **`scripts/augment_regime_column.py`**: append column to Parquet. **`scripts/train_regime_model.py`**: multiclass **RF** on numeric+`symbol`/`tf` only (excludes bias/sig); same split YAML; **`validation_by_symbol`**; optional **`regime_rf_week6.joblib`**. | Augment + train complete; metrics JSON shows regime counts and val accuracy / macro-F1. |
 
 ---
 
@@ -234,6 +247,17 @@ Work **in order**; each week should end with something you can **demo or verify*
 - [ ] Filter mode demonstrably reduces trade count in forward test when intended.
 - [ ] No unhandled `WebRequest` errors; connection failures logged and policy applied.
 
+### 6.5 Weekly implementation plan (Phase 4 — local inference)
+
+Optional phase; skip entirely if you stop after **Phase 3**. Work **in order**; each week ends with a **host demo** and/or **EA shadow** check.
+
+| Week | Focus | Deliverables | Exit (that week) |
+|------|--------|--------------|------------------|
+| **1** | **API skeleton** | **FastAPI** + **uvicorn** on **`127.0.0.1`** only; **`GET /health`**; load **Phase 3 artifact** at startup; config via **env** (model path, threshold defaults). | `curl http://127.0.0.1:<port>/health` returns OK with model loaded. |
+| **2** | **Score endpoint** | **`POST /score`** (or `/predict`) accepts small JSON feature vector or **`signal_id`** lookup (if you add optional DB read); returns **`score`** + **`allow`**; strict **timeout** handling; unit test or scripted client. | Local script scores **≥1** real row from Phase 3 dataset in under the configured **timeout** ms. |
+| **3** | **Shadow in EA** | Add **`Include/CTS_AiGate.mqh`** + inputs (`InpUseAiFilter`, `InpAiEndpoint`, `InpAiTimeoutMs`, `InpAiThreshold`, `InpAiShadowMode`); **`WebRequest`** to localhost; **shadow mode** logs score **without** changing `CTS_TryOpen` decisions. | Forward / visual run: journal shows scores; **fills match** baseline CTS with filter **off** or shadow **on**. |
+| **4** | **Filter policy + hardening** | Enable **filter** path (`score >= threshold`); fail-safe on **timeout / HTTP error** (documented); **tester** path: disable HTTP or **mock scores file** (no real HTTP in optimization). | §6.4 exit criteria: filter changes trade count when intended; no uncaught `WebRequest` errors. |
+
 ---
 
 ## 7. Phase 5 — Adaptive controls (later, still simple)
@@ -244,6 +268,16 @@ Only after Phases 2–4 are stable:
 - Avoid **continuous online learning** in v1; use **periodic manual retrain** with frozen deployment windows.
 
 **Exit criteria:** documented rules for when parameters change and backtest evidence for each change.
+
+### 7.1 Weekly implementation plan (Phase 5 — adaptive controls)
+
+Only start after **Phase 4** (or **Phase 3** + explicit decision to skip live API) is stable. Weeks are **small policy** changes, not new ML architectures.
+
+| Week | Focus | Deliverables | Exit (that week) |
+|------|--------|--------------|------------------|
+| **1** | **Regime buckets** | Define **buckets** (e.g. ATR quartiles from logged `atr1`, or output of optional Phase 3 regime model); map each live bar to a **bucket id**; document in **`configs/adaptive_v1.yaml`** (or similar). | Bucketing script reproduces bucket labels on **historical** dataset; table of frequencies. |
+| **2** | **Threshold / risk table** | For each bucket: **AI threshold** and/or **risk multiplier** (static table v1—no online learning); implement read path in **host service** or **EA inputs** (your choice—prefer **host** if Phase 4 API exists). | Backtest or forward evidence: **at least one** bucket change shows intended effect vs global default. |
+| **3** | **Release + cadence** | **Change log** per parameter change; **manual retrain** calendar (e.g. quarterly); rollback rule if metrics degrade. | Phase 5 **exit criteria** met: documented rules + evidence links (run ids / reports). |
 
 ---
 
@@ -260,9 +294,9 @@ Only after Phases 2–4 are stable:
 **Suggested timeline (adjust to your cadence):**
 
 - **Phase 2:** **§4.5** (five weekly blocks). Treat earlier **2a/2b** sprint language as optional shorthand—do not maintain two competing Phase 2 plans.
-- **3** — First classifier + walk-forward protocol: 2–3 sprints.
-- **4** — **Host-local** FastAPI + shadow mode + optional filter (`WebRequest` → `127.0.0.1`): 2 sprints.
-- **5** — Only if Phase 4 proves value.
+- **Phase 3:** **§5.5** (five core weeks + optional Week 6 regime / robustness).
+- **Phase 4:** **§6.5** (four weekly blocks; optional—skip if you do not deploy live scoring).
+- **Phase 5:** **§7.1** (three weekly blocks; only if adaptive controls add value after Phase 4).
 
 ---
 
@@ -339,7 +373,7 @@ One **signal evaluation** row per **new bar** on the configured signal timeframe
 
 ### 11.3 CSV files (signals)
 
-- **Partition:** one file per **UTC calendar day** (from `TimeGMT()` for the filename only): `CTS_SIGNALS_YYYY-MM-DD.csv` under `MQL5/Files/<subdir>/` (default subdir `CTS_logs`).
+- **Partition:** one file per **UTC calendar day** (from `TimeGMT()` for the filename only): `CTS_SIGNALS_YYYY-MM-DD.csv` under `MQL5/Files/<subdir>/` (default **`CTS_logs`** on chart; **`CTS_logs_tester`** in Strategy Tester when `InpLogInTester` — physical root is **`Tester/<id>/Agent-*/…`**, not `Terminal/<id>/…`; see `cts_ml/README.md`).
 - **Encoding / delimiter:** **Comma**-separated. EA uses **`FILE_TXT` + `FILE_ANSI`** (ASCII-safe literals) for **broad terminal build compatibility**—`FILE_UTF8` is not available on all builds. Python: `read_csv(..., encoding="latin-1")` or ASCII-safe `utf-8` for v1 rows.
 - **Append:** rolling append within the day; at UTC day rollover, open a new file and write the header if the file is new.
 
@@ -359,7 +393,8 @@ Exact column order for `CTS_SIGNALS_*.csv` (row 1 = header):
 ### 11.6 Tester policy
 
 - Default **logging in Strategy Tester** `InpLogInTester = false` to avoid huge disk use during optimization.
-- Optional: `InpLogTesterMaxRows` cap; path suffix `CTS_logs/tester/` when tester logging is enabled (Week 3).
+- When enabled: CSVs use **`InpLogTesterSubdir`** (default **`CTS_logs_tester`**), still under `MQL5/Files/…` but the **host root** is the tester agent folder, e.g. `%AppData%\MetaQuotes\Tester\<TERMINAL_ID>\Agent-127.0.0.1-3000\MQL5\Files\CTS_logs_tester\` (agent folder name varies by host/port).
+- Optional: `InpLogTesterMaxRows` cap (signals + executions); **`0`** = no cap.
 
 ### 11.7 Machine / repo (Week 4+)
 
@@ -384,4 +419,13 @@ Exact column order for `CTS_SIGNALS_*.csv` (row 1 = header):
 | 1.7 | 2026-05-14 | Phase 2 **Week 2**: real signal rows each new bar, OHLC in `CTSPriceBuf`, `CTS_SignalBias*`, UTC day rollover, `signal_id`. |
 | 1.8 | 2026-05-14 | Phase 2 **Week 4**: `cts_ml/docker-compose.yml`, `.env.example`, `sql/migrations/001_init_cts_logging.sql` (`cts_signals`, `cts_orders`); README runbook; `.gitignore` for `.env`. |
 | 1.9 | 2026-05-14 | Phase 2 **Week 5**: `scripts/load_csv_to_postgres.py`, `002_idempotent_load_indexes.sql`, `configs/.env.example`, `requirements.txt`; §4.4 exit criteria checked. |
+| 1.10 | 2026-05-15 | **§5.5**, **§6.5**, **§7.1**: weekly implementation tables for Phases **3**, **4**, **5**; §8 timeline pointers updated. |
+| 1.11 | 2026-05-15 | Phase 3 **Week 1**: `cts_ml/labeling.md`, `cts_ml/sql/examples/join_signals_orders_example.sql`, README Week-1 test notes; §5.5 Week 1 row paths updated. |
+| 1.12 | 2026-05-15 | Document **Strategy Tester** CSV root (`MetaQuotes\Tester\…\Agent-*\MQL5\Files\`) vs **Terminal**; fix §11.6 path wording; loader examples in `cts_ml/README.md`. |
+| 1.13 | 2026-05-15 | Phase 3 **Week 1 closed**: tester CSV load + join smoke; `labeling.md` §5.C locks **`y_has_fill`** on `would_trade`; verification log §8; example SQL uses verified `signal_id`. |
+| 1.14 | 2026-05-15 | Phase 3 **Week 2**: `scripts/build_dataset.py`, `pandas`/`pyarrow` in `requirements.txt`, `cts_ml/data/` gitignored; README Week 2 runbook; §5.5 Week 2 row aligned. |
+| 1.15 | 2026-05-15 | Phase 3 **Week 3**: `scripts/train_baseline.py`, `configs/baseline_split_v1.yaml`, `scikit-learn`/`PyYAML` in `requirements.txt`; README Week 3; §5.5 Week 3 row aligned. |
+| 1.16 | 2026-05-15 | Phase 3 **Week 4**: `scripts/train_booster.py`, `scripts/ml_common.py` (shared split/features), `xgboost` in `requirements.txt`; calibration CSV + bucket JSON; README Week 4; §5.5 Week 4 row aligned. |
+| 1.17 | 2026-05-15 | Phase 3 **Week 5**: `export_phase3_bundle.py`, `inference_score_row.py`, `exports/` gitignored; tighter pins + `joblib` in `requirements.txt`; README Week 5; §5.4 Phase 3 exit checked; §5.5 Week 5 row aligned. |
+| 1.18 | 2026-05-15 | Phase 3 **Week 6 (optional)**: `regime_rules.py`, `augment_regime_column.py`, `train_regime_model.py`; README + labeling + §5.5 Week 6 row. |
 

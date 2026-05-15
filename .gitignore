@@ -8,3 +8,9 @@ __pycache__/
 .env
 cts_ml/.env
 configs/.env
+
+# Phase 3 — generated datasets (local only)
+cts_ml/data/
+
+# Phase 3 Week 5 — exported model bundles (joblib + manifest; regenerate locally)
+cts_ml/exports/
