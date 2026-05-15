@@ -14,3 +14,6 @@ cts_ml/data/
 
 # Phase 3 Week 5 — exported model bundles (joblib + manifest; regenerate locally)
 cts_ml/exports/
+
+# Phase 4 API local env
+cts_ml/phase4_api/.env

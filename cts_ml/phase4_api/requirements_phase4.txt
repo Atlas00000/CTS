@@ -1,0 +1,9 @@
+# Phase 4 API — install on top of cts_ml/requirements.txt (Phase 3 train/export) or standalone.
+#   pip install -r requirements.txt -r phase4_api/requirements_phase4.txt
+
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.0
+pydantic-settings>=2.0
+python-dotenv>=1.0.0
+httpx>=0.27.0

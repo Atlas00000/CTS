@@ -237,9 +237,44 @@ python scripts/export_phase3_bundle.py --joblib data\_week4_test_run_xgb.joblib 
 python scripts/inference_score_row.py --bundle-dir exports\phase3_v1 --from-parquet data\cts_test_impl.parquet --row-index 0
 ```
 
-**Format:** native **sklearn Pipeline + joblib** (not ONNX) per §5.3 single path.
+**Format:** native **sklearn Pipeline + joblib** (not ONNX) per §5.3 single path. **`export_phase3_bundle.py` accepts any compatible `*.joblib`** (e.g. **`train_baseline.py --out-model`** RF or **`train_booster`** XGB pipeline).
 
 **EA:** unchanged — no compile.
+
+---
+
+## Phase 4 Week 1 (local API — shadow / filter prep)
+
+**Policy (rollout):** **Shadow only** first — EA keeps normal execution; log **`score`**, **`threshold`**, **`would_allow`**. Enable **filter** only after enough live shadow samples + calibration review. **Allow** if `score >= threshold` (start **0.60–0.65**, env **`CTS_AI_THRESHOLD`**). **Filter ON:** timeout/error ⇒ **skip trade**. **Shadow:** timeout/error ⇒ **continue + log**.
+
+**Code:** `cts_ml/phase4_api/` — **`app.py`** (FastAPI **`GET /health`**, **`POST /score`**), **`model_loader.py`**, **`scorer.py`**, **`schemas.py`**, **`requirements_phase4.txt`**, **`.env.example`**.
+
+**Binding:** **`127.0.0.1:8008`** (override with **`CTS_API_HOST`** / **`CTS_API_PORT`**). **Strategy Tester:** disable HTTP by default (**`InpUseAiFilterInTester = false`** when EA wiring lands in Week 3).
+
+**Setup:**
+
+```powershell
+cd cts_ml
+pip install -r requirements.txt -r phase4_api\requirements_phase4.txt
+copy phase4_api\.env.example phase4_api\.env
+# Edit phase4_api\.env: CTS_PHASE3_MODEL=..\exports\phase3_v1\model.joblib (after export)
+```
+
+**Run (from `cts_ml/` so imports resolve):**
+
+```powershell
+python -m uvicorn phase4_api.app:app --host 127.0.0.1 --port 8008
+```
+
+**Smoke (optional, uses TestClient; needs bundle + Parquet):**
+
+```powershell
+python scripts\smoke_phase4_api.py
+```
+
+**Manual check:** browser or `curl http://127.0.0.1:8008/health` — then **`POST /score`** with a JSON body containing all keys from **`manifest.json` → `feature_columns`** (same types as training).
+
+**EA / MetaEditor:** Week 1 is **Python only** — nothing to compile until **Week 3** (`WebRequest` + `CTS_AiGate.mqh`).
 
 ---
 

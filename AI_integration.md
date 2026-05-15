@@ -264,11 +264,10 @@ Use this as a **sequenced backlog** under §6.5; each week ends with a concrete 
 
 **Week 1 — API skeleton**
 
-- Add a small Python service package (e.g. `cts_ml/phase4_api/`) with **`pyproject.toml`** or **`requirements.txt`** entries: `fastapi`, `uvicorn`, existing `joblib` / `scikit-learn`.
-- Bind **`127.0.0.1`** only; port from **env** (e.g. `CTS_AI_PORT`).
-- **`GET /health`**: returns JSON with `ok`, `model_path`, `model_loaded` boolean.
-- Load **`model.joblib`** at startup from **env** `CTS_PHASE3_MODEL` (path to bundle `model.joblib`); fail fast with clear log if missing.
-- Document **`README.md`** Phase 4: how to `uvicorn` from repo root / `cts_ml`.
+- **Implemented (repo):** `cts_ml/phase4_api/` — FastAPI **`GET /health`**, **`POST /score`**; load **`model.joblib`** + sibling **`manifest.json`** from **`CTS_PHASE3_MODEL`**; **`requirements_phase4.txt`** + **`phase4_api/.env.example`**; runbook in **`cts_ml/README.md`** (Phase 4 Week 1).
+- Bind **`127.0.0.1`** only; port from **`CTS_API_PORT`** (default **8008**); **`python -m uvicorn phase4_api.app:app --host 127.0.0.1 --port 8008`** from **`cts_ml/`**.
+- **`GET /health`**: returns **`model_loaded`**, paths, **`threshold`**, **`label_column`** from manifest.
+- Optional smoke: **`python scripts/smoke_phase4_api.py`** (TestClient).
 
 **Week 2 — Score endpoint**
 
@@ -350,12 +349,18 @@ CTS/
 ../cts_ml/                  (optional separate folder or git repo)
 ├── docker-compose.yml    # postgres (+ optional tools); bind to 127.0.0.1
 ├── README.md             # docker compose up, DSN, volume backup notes
-├── requirements.txt      # psycopg, sqlalchemy (optional), pandas/polars, sklearn, xgboost OR lightgbm, uvicorn, fastapi (Phase 4)
+├── requirements.txt      # Phase 3 host stack (see file)
+├── phase4_api/             # Phase 4 Week 1+: FastAPI scorer (uvicorn on 127.0.0.1)
+│   ├── app.py
+│   ├── model_loader.py
+│   ├── scorer.py
+│   ├── schemas.py
+│   ├── requirements_phase4.txt
+│   └── .env.example
 ├── scripts/
 │   ├── build_dataset.py
 │   ├── load_csv_to_postgres.py
-│   ├── train_model.py
-│   └── export_onnx_or_json.py
+│   └── smoke_phase4_api.py
 ├── sql/
 │   └── migrations/
 │       └── 001_init_cts_logging.sql
@@ -363,7 +368,7 @@ CTS/
 ├── configs/
 │   ├── logging_schema_v1.yaml
 │   └── .env.example          # POSTGRES_* for compose + POSTGRES_DSN for host Python—never commit real .env
-└── app/                      # optional (Phase 4): FastAPI package—run with uvicorn on host by default
+└── exports/                  # gitignored: model.joblib + manifest (Phase 3 Week 5)
 ```
 
 Avoid deeper nesting until a second EA or shared library forces it.
@@ -467,5 +472,5 @@ Exact column order for `CTS_SIGNALS_*.csv` (row 1 = header):
 | 1.18 | 2026-05-15 | Phase 3 **Week 6 (optional)**: `regime_rules.py`, `augment_regime_column.py`, `train_regime_model.py`; README + labeling + §5.5 Week 6 row. |
 | 1.19 | 2026-05-15 | **Execution CSV v2** + **`entry_price`**: `CTS_LogCsv.mqh` / `CTS.mq5` **v1.07**; `001` + **`003_cts_orders_entry_price.sql`**; `load_csv_to_postgres.py` (v1/v2 headers); `build_dataset.py` **`fill_entry_price`**; `labeling.md` §5.B; `cts_ml/README` + **§11.4** execution headers; **§4.5** Phase 2 Week 3 row + **§5.5** Phase 3 Weeks 1–2 rows. |
 | 1.20 | 2026-05-15 | **`build_dataset.py`** dedupe join (EXISTS + LATERAL latest order); **`configs/.env`** workflow note in **`.env.example`**. |
-| 1.21 | 2026-05-15 | **R / proxy labels** in **`build_dataset.py`** (fill SL/side/TP, **`forward_close_1`**, R prices, **`y_proxy_1bar_close_ge_plus_1r`**); **`labeling.md` §5.D**; **`train_baseline.py --out-model`**; **`export_phase3_bundle`** manifest optional columns; **§6.5.1** Phase 4 weekly checklist. |
+| 1.22 | 2026-05-15 | **Phase 4 Week 1**: `cts_ml/phase4_api/` FastAPI **`/health`** + **`/score`**; **`requirements_phase4.txt`**, **`.env.example`**, **`scripts/smoke_phase4_api.py`**; README Phase 4 runbook; **§6.5.1** Week 1 bullets; **`.gitignore`** `phase4_api/.env`. |
 
