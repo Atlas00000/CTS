@@ -1,0 +1,16 @@
+# Phase 5 Week 6 (stretch) — session buckets; NOT loaded by phase4_api v1.
+# Use scripts/session_buckets.py for offline analysis first.
+version: 1
+bucket_mode: session_hour_v1
+session_hour:
+  labels:
+    - asia
+    - london
+    - ny
+    - off
+  # UTC hour rules documented in session_buckets.py
+policies:
+  default:
+    threshold: 0.65
+    risk_multiplier: 1.0
+  by_bucket: {}

@@ -1,0 +1,55 @@
+version: 1
+effective_from: null
+bucket_mode: combined
+split_config: configs/baseline_split_v1.yaml
+atr_quartile:
+  fit_on: train_rows_only
+  edges:
+  - 0.000204
+  - 0.00033
+  - 0.000511
+  labels:
+  - q1_low
+  - q2
+  - q3
+  - q4_high
+regime_rule:
+  version: regime_rule_v1
+  labels:
+  - trend_long
+  - trend_short
+  - chop
+policies:
+  default:
+    threshold: 0.65
+    risk_multiplier: 1.0
+  by_bucket:
+    q1_low|chop:
+      threshold: 0.65
+      risk_multiplier: 0.85
+    q1_low|trend_long:
+      threshold: 0.65
+      risk_multiplier: 1.0
+    q1_low|trend_short:
+      threshold: 0.65
+      risk_multiplier: 1.0
+    q2|trend_long:
+      threshold: 0.63
+      risk_multiplier: 1.0
+    q2|trend_short:
+      threshold: 0.63
+      risk_multiplier: 1.0
+    q3|trend_long:
+      threshold: 0.6
+      risk_multiplier: 1.0
+    q3|trend_short:
+      threshold: 0.68
+      risk_multiplier: 1.0
+    q4_high|trend_long:
+      threshold: 0.63
+      risk_multiplier: 1.0
+    q4_high|trend_short:
+      threshold: 0.63
+      risk_multiplier: 1.0
+policy_notes: 'Week2: threshold from train fill_rate tiers; risk_multiplier=0.85 when
+  fill_rate<0.62; sparse buckets (<5 rows) use default threshold.'

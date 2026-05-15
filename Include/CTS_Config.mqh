@@ -23,4 +23,11 @@ enum ENUM_CTS_TP_MODE
    CTS_TP_RR
   };
 
+// Phase 4 — labels appear in Strategy Tester dropdown (keep short)
+enum ENUM_CTS_AI_GATE_MODE
+  {
+   CTS_AI_SHADOW = 0,   // SHADOW — log only
+   CTS_AI_FILTER = 1    // FILTER — block trades
+  };
+
 #endif // CTS_CONFIG_MQH

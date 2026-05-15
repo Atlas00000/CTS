@@ -309,7 +309,7 @@ python scripts\phase4_score_client.py --from-parquet data\cts_dataset_7y_2026-05
 | Input | Default | Meaning |
 |-------|---------|---------|
 | **`InpUseAiGate`** | `false` | Master switch |
-| **`InpAiShadowMode`** | `true` | **Shadow:** log `score` / `threshold` / `would_allow`; **do not** block trades |
+| **`InpAiGateMode`** | `CTS_AI_SHADOW` | **`CTS_AI_SHADOW`:** log only. **`CTS_AI_FILTER`:** block low scores |
 | **`InpUseAiGateInTester`** | `false` | No HTTP in Strategy Tester (recommended) |
 | **`InpAiEndpoint`** | `http://127.0.0.1:8008/score` | Must be allow-listed in MT5 (see below) |
 | **`InpAiTimeoutMs`** | `500` | WebRequest timeout (ms) |
@@ -338,7 +338,293 @@ python scripts\phase4_score_client.py --from-parquet data\cts_dataset_7y_2026-05
 
 ### Filter note
 
-**`InpAiShadowMode = false`** enables block-when-`would_allow=false` (Week 4 policy). Default stays **shadow** for rollout.
+**`InpAiGateMode = CTS_AI_FILTER`** enables block-when-`would_allow=false` (Week 4 policy). Default stays **shadow** for rollout.
+
+---
+
+## Phase 4 Week 4 (filter + tester mock — compile & test)
+
+**Code:** **`CTS.mq5` v1.10** + hardened **`Include/CTS_AiGate.mqh`**.
+
+| Input | Default | Meaning |
+|-------|---------|---------|
+| **`InpUseAiGate`** | `true` | Master switch |
+| **`InpAiGateMode`** | `CTS_AI_SHADOW` | **`CTS_AI_SHADOW`:** log only. **`CTS_AI_FILTER`:** allow iff `score >= InpAiThreshold` |
+| **`InpUseAiGateInTester`** | `false` | Strategy Tester: POST to API (slow; use mock instead) |
+| **`InpAiMockScoreInTester`** | `-1` | Tester only: fixed score **0..1**; **`<0`** = disabled |
+| **`InpAiThreshold`** | `0.65` | **Filter** uses this (EA is source of truth for allow/deny) |
+
+### Fail-safe policy (filter mode)
+
+| Event | Shadow (`CTS_AI_SHADOW`) | Filter (`CTS_AI_FILTER`) |
+|-------|--------------------------------|------------------|
+| `score < InpAiThreshold` | Log, **trade opens** | **Skip trade** (`filter_block`) |
+| HTTP timeout / error / bad JSON | Log, **trade opens** | **Skip trade** (`filter_error`) |
+
+Journal reason codes: `shadow`, `ok`, `filter_block`, `filter_error`, `mock_tester`.
+
+### Compile (MetaEditor)
+
+1. Open **`CTS.mq5`** → **Compile** (F7) — **0 errors**.
+2. Re-attach EA on chart if already running (reload inputs).
+
+### Test A — Shadow (live / visual, unchanged fills)
+
+1. Start API from `cts_ml/`:
+   ```powershell
+   python -m uvicorn phase4_api.app:app --host 127.0.0.1 --port 8008
+   ```
+2. EA inputs: **`InpUseAiGate=true`**, **`InpAiGateMode=CTS_AI_SHADOW`**, **`InpUseAiGateInTester=false`**
+3. On signal bar, Experts tab: `CTS AiGate: ... shadow=true reason=shadow`
+4. Trades should still open as without filter.
+
+### Test B — Filter (expect fewer trades)
+
+1. Same API running; WebRequest URL allow-listed.
+2. **`InpAiGateMode=CTS_AI_FILTER`**, **`InpAiThreshold=0.65`**
+3. On init: `CTS AiGate: FILTER MODE — skip when score < 0.6500`
+4. Low-score signals: `FILTER BLOCK` and **no** `CTS_TryOpen`.
+5. API down / wrong URL: filter **skips** trade (fail-safe), journal shows `filter_error`.
+
+### Test C — Strategy Tester mock (no HTTP)
+
+1. **`InpUseAiGate=true`**, **`InpAiMockScoreInTester=0.90`**, **`InpAiGateMode=CTS_AI_FILTER`**, **`InpUseAiGateInTester=false`**
+2. Init log: `tester MOCK score=0.9000 ...`
+3. With threshold **0.65**, mock allows all signals (no WebRequest).
+4. **`InpAiMockScoreInTester=0.10`** → filter blocks every signal.
+
+### Optional — point API at merged RF
+
+```powershell
+cd cts_ml
+python scripts\export_phase3_bundle.py --joblib data\baseline_merged_rf.joblib --out-dir exports\phase3_merged
+# Set phase4_api\.env CTS_PHASE3_MODEL=..\exports\phase3_merged\model.joblib
+```
+
+---
+
+## Phase 5 Week 1 (adaptive buckets — Python only)
+
+**Goal:** define **bucket_id** on historical data — ATR quartiles (train-fit) + **`regime_rule_v1`**. No EA compile.
+
+| File | Role |
+|------|------|
+| **`configs/adaptive_v1.yaml`** | `bucket_mode`, split ref, ATR labels (edges filled by script) |
+| **`scripts/adaptive_buckets.py`** | Core assignment logic |
+| **`scripts/assign_buckets.py`** | CLI — frequencies + optional Parquet output |
+
+### Commands (from `cts_ml/`)
+
+```powershell
+cd cts_ml
+# Use your Parquet from build_dataset.py (newest under data/ if omitted)
+python scripts\assign_buckets.py -i data\cts_dataset_merged_2026-05-15.parquet -v
+
+# Persist train-fitted ATR edges into YAML
+python scripts\assign_buckets.py -i data\cts_dataset_merged_2026-05-15.parquet --write-cutpoints -v
+
+# Write augmented dataset + frequency CSV
+python scripts\assign_buckets.py -i data\cts_dataset_merged_2026-05-15.parquet `
+  --write-cutpoints `
+  -o data\cts_dataset_adaptive_v1.parquet `
+  --freq-csv data\adaptive_v1_bucket_freq.csv
+```
+
+### `bucket_mode` (in YAML)
+
+| Value | `bucket_id` example |
+|-------|---------------------|
+| **`atr_quartile`** | `q2` |
+| **`regime_rule_v1`** | `chop` |
+| **`combined`** (default) | `q2\|trend_long` |
+
+### Exit (Week 1)
+
+- Console shows **train** and **val** counts per `bucket_id` (and sub-columns if `combined`).
+- **`adaptive_v1.yaml`** has three **`atr_quartile.edges`** after `--write-cutpoints`.
+- Optional: **`cts_dataset_adaptive_v1.parquet`** includes `regime_rule_v1`, `atr_quartile`, `bucket_id`.
+
+**EA / MetaEditor:** nothing to compile this week.
+
+---
+
+## Phase 5 Week 2 (policy table — Python only)
+
+**Goal:** per-bucket **`threshold`** (+ optional **`risk_multiplier`**) in **`configs/adaptive_v1.yaml`** from train evidence.
+
+```powershell
+cd cts_ml
+python scripts\analyze_buckets.py -i data\cts_dataset_adaptive_v1.parquet -v
+
+python scripts\analyze_buckets.py -i data\cts_dataset_adaptive_v1.parquet `
+  --write-policies `
+  --out-stats data\adaptive_v1_bucket_stats.csv `
+  --out-json data\adaptive_v1_policy_suggest.json
+```
+
+**Outputs:** `data/adaptive_v1_bucket_stats.csv`, `data/adaptive_v1_policy_suggest.json`, updated **`policies.by_bucket`** in YAML.
+
+**Rationale:** see **`docs/adaptive_v1.md`**.
+
+**Exit:** console lists buckets with non-default threshold; open `configs/adaptive_v1.yaml` and confirm `policies.by_bucket` (9 keys for combined mode on merged dataset).
+
+**EA:** still no compile (Week 3 wires API).
+
+---
+
+## Phase 5 Week 3 (adaptive API — Python only)
+
+**Goal:** load **`configs/adaptive_v1.yaml`** at API startup; **`POST /score`** returns effective **`threshold`**, **`bucket_id`**, optional **`risk_multiplier`**.
+
+| Artifact | Role |
+|----------|------|
+| **`phase4_api/adaptive.py`** | `resolve_policy(features)` → bucket + threshold |
+| **`phase4_api/.env.example`** | `CTS_ADAPTIVE_CONFIG=../configs/adaptive_v1.yaml` |
+| **`scripts/test_phase5_week3.py`** | TestClient exit tests |
+
+**Env (copy `phase4_api/.env.example` → `.env` if needed):**
+
+```powershell
+cd cts_ml
+$env:CTS_ADAPTIVE_CONFIG = "configs\adaptive_v1.yaml"
+python scripts\test_phase5_week3.py
+```
+
+**Manual smoke (uvicorn running from `cts_ml/`):**
+
+```powershell
+uvicorn phase4_api.app:app --host 127.0.0.1 --port 8008
+curl http://127.0.0.1:8008/health
+# POST /score or /policy with one Parquet row JSON (see test script)
+```
+
+**Exit:** `PASS Week 3`; `/health` shows `adaptive_enabled: true`, `adaptive_version: 1`; same row → stable `bucket_id` on `/score` and `/policy`.
+
+**EA:** no MetaEditor compile until **Week 4** (parse `bucket_id` + effective threshold in `CTS_AiGate`).
+
+---
+
+## Phase 5 Week 4 (EA shadow — compile & test)
+
+**Goal:** journal logs **`bucket=`** and **`thr_eff=`** from API; **filter** uses server effective threshold (not only `InpAiThreshold`). **Shadow** still never blocks. **No lot sizing** from `risk_multiplier` yet.
+
+| Change | Detail |
+|--------|--------|
+| **`CTS.mq5` v1.12** | Mock inputs: **`InpAiMockThresholdInTester`**, **`InpAiMockBucketInTester`** |
+| **`CTS_AiGate.mqh`** | Parse `bucket_id`, `risk_multiplier`; filter: `score >= thr_eff` |
+
+**Compile:**
+
+```powershell
+# MetaEditor F7 on CTS.mq5, or:
+& "C:\Program Files\MetaTrader 5\metaeditor64.exe" /compile:"...\Experts\CTS\CTS.mq5" /log
+```
+
+**Python contract test (no MT5 required):**
+
+```powershell
+cd cts_ml
+python scripts\test_phase5_week4.py
+```
+
+**Strategy Tester (mock adaptive bucket):**
+
+| Input | Value |
+|-------|--------|
+| `InpUseAiGate` | `true` |
+| `InpAiGateMode` | `CTS_AI_SHADOW` |
+| `InpAiMockScoreInTester` | `0.70` |
+| `InpAiMockThresholdInTester` | `0.63` |
+| `InpAiMockBucketInTester` | `q3|trend_long` |
+
+Experts tab line must include `bucket=q3|trend_long thr_eff=0.6300` and `shadow=true`. Trade count unchanged vs AiGate off in shadow.
+
+**Live chart:** start uvicorn with `CTS_ADAPTIVE_CONFIG`; allow `http://127.0.0.1:8008`; shadow on chart — lines show real API `bucket_id` / `thr_eff`.
+
+**Exit:** `PASS Week 4` + compile 0 errors.
+
+---
+
+## Phase 5 Week 5 (filter + risk + release — compile & test)
+
+**Goal:** adaptive **filter** proven in tester; optional **lot scaling**; ops docs.
+
+| Todo | Artifact |
+|------|-----------|
+| 1 | **`CTS.mq5` v1.13** — `InpAiApplyRiskMultiplier`, clamps, mock risk mult |
+| 2 | **`CTS_Risk.mqh`** — `CTS_ApplyRiskMultiplier` |
+| 3 | **`CHANGELOG-adaptive.md`**, **`docs/adaptive_ops.md`** |
+| 4 | **`scripts/test_phase5_week5.py`**, **`scripts/parse_tester_aigate.py`** |
+
+**Compile (after pull):**
+
+```powershell
+& "C:\Program Files\MetaTrader 5\metaeditor64.exe" /compile:"...\Experts\CTS\CTS.mq5" /log
+# Expect: Result: 0 errors
+```
+
+**Python:**
+
+```powershell
+cd cts_ml
+python scripts\test_phase5_week5.py
+python scripts\test_phase5_week4.py
+python scripts\test_phase5_week3.py
+```
+
+**Tester A — shadow (same trades as baseline)**
+
+| Input | Value |
+|-------|--------|
+| `InpAiGateMode` | `CTS_AI_SHADOW` |
+| `InpAiMockScoreInTester` | `0.7` |
+| `InpAiMockThresholdInTester` | `0.63` |
+| `InpAiMockBucketInTester` | `q3\|trend_long` (no backtick) |
+
+**Exit:** final balance **4855.80** pips (same as prior shadow runs).
+
+**Tester B — filter blocks all (proof)**
+
+| Input | Value |
+|-------|--------|
+| `InpAiGateMode` | `CTS_AI_FILTER` |
+| `InpAiMockScoreInTester` | `0.10` |
+| `InpAiMockThresholdInTester` | `-1` (use 0.65) |
+
+**Exit:** balance **5000.00**; journal has `FILTER BLOCK`.
+
+**Tester C — adaptive filter stricter than fixed 0.65**
+
+| Input | Value |
+|-------|--------|
+| `InpAiGateMode` | `CTS_AI_FILTER` |
+| `InpAiMockScoreInTester` | `0.60` |
+| `InpAiMockThresholdInTester` | `0.63` |
+
+Score 0.60 &lt; 0.63 → **blocks**; with fixed 0.65 would **allow**.
+
+**Parse log:**
+
+```powershell
+python scripts\parse_tester_aigate.py "%APPDATA%\MetaQuotes\Tester\...\logs\20260515.log" --since 13:09:26
+```
+
+**Risk multiplier (optional):** `InpAiApplyRiskMultiplier=true`, mock `InpAiMockRiskMultiplierInTester=0.85` — journal `lots 0.10 -> 0.08`.
+
+---
+
+## Phase 5 Week 6 (stretch — session buckets, Python only)
+
+**Not wired to EA/API v1.** Explore UTC session bins before adding to YAML.
+
+```powershell
+cd cts_ml
+python scripts\session_buckets.py -i data\cts_dataset_adaptive_v1.parquet -v
+```
+
+Skeleton: **`configs/adaptive_session_v1.yaml`**.
+
+**EA:** no compile for Week 6.
 
 ---
 

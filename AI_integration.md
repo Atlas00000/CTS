@@ -285,30 +285,125 @@ Use this as a **sequenced backlog** under §6.5; each week ends with a concrete 
 
 **Week 4 — Filter + hardening**
 
-- When filter mode on: if **`score >= InpAiThreshold`** proceed as baseline; else **skip open** (document exact branch next to `CTS_TryOpen`).
-- On **timeout**, **HTTP error**, or malformed JSON: apply **fail-safe** (recommend: skip trade when filter enabled); always **log** reason code.
-- Strategy Tester: **`InpAiDisableInTester`** or equivalent so optimization does not depend on HTTP unless using a **mock** file-based scorer (defer mock to “stretch” if needed).
+- **Implemented (repo):** **`CTS.mq5` v1.10** + **`CTS_AiGate.mqh`** — filter branch in **`CTS_AiGate_HandleBeforeOpen`** (returns `false` → no **`CTS_TryOpen`**).
+- **Allow rule (filter):** `score >= InpAiThreshold` (EA threshold; server `would_allow` logged for comparison).
+- **Fail-safe (filter only):** HTTP timeout, non-2xx, parse failure, JSON build failure → **skip trade**; shadow → **allow + log**.
+- **Reason codes** in journal: `shadow`, `ok`, `filter_block`, `filter_error`, `mock_tester`.
+- **Tester mock:** **`InpAiMockScoreInTester`** in **[0,1]** (fixed score, no HTTP); **`<0`** = off. Alternative: **`InpUseAiGateInTester=true`** for real HTTP (not recommended for optimization).
+- Runbook: **`cts_ml/README.md`** Phase 4 Week 4. Rollout: keep **`InpAiShadowMode=true`** until live shadow validated, then set **`false`** for filter.
 
 ---
 
 ## 7. Phase 5 — Adaptive controls (later, still simple)
 
-Only after Phases 2–4 are stable:
+**Prerequisites:** Phase **2** logging stable; Phase **3** exported model + dataset; Phase **4** shadow/filter validated (or explicit decision to skip live API and keep adaptive policy **offline-only** until later).
 
-- Adjust **threshold** or **risk multiplier** by **regime bucket** (from Phase 3 regime model or simple volatility quartiles from logged ATR).
-- Avoid **continuous online learning** in v1; use **periodic manual retrain** with frozen deployment windows.
+**Goals (v1 — narrow):**
 
-**Exit criteria:** documented rules for when parameters change and backtest evidence for each change.
+- Adjust **AI threshold** and/or **risk multiplier** by a **static bucket** (no online learning in MT5).
+- Buckets from data you **already log** — prefer **`atr1` quartiles** and/or **`regime_rule_v1`** (Phase 3 Week 6).
+- Policy lives in **versioned YAML** on the host; **Phase 4 API** returns bucket-aware `threshold` (and optional `risk_multiplier` for future EA use).
 
-### 7.1 Weekly implementation plan (Phase 5 — adaptive controls)
+**Non-goals for v1 (defer):**
 
-Only start after **Phase 4** (or **Phase 3** + explicit decision to skip live API) is stable. Weeks are **small policy** changes, not new ML architectures.
+- Session/time-of-day tables, multi-symbol portfolio routing, auto-retrain pipelines, new EA indicators, LLM logic.
+- Changing deterministic CTS entry rules — adaptive layer only touches **AI gate** and optionally **sizing**.
+
+### 7.1 Objectives
+
+| Control | v1 behavior |
+|---------|----------------|
+| **AI threshold** | Per-bucket `threshold` overrides global `CTS_AI_THRESHOLD` / `InpAiThreshold`. |
+| **Risk multiplier** | Optional per-bucket scalar on `InpFixedLots` or risk-% path (implement only after threshold path is proven). |
+| **Bucket assignment** | Same features as Phase 4 `/score` body (`atr1`, EMA/MACD, bias flags) — no new CSV columns required for ATR/regime buckets. |
+
+### 7.2 Phase 5 exit criteria
+
+- [x] **`configs/adaptive_v1.yaml`** (or successor) checked in with **bucket definitions** + **policy table** + `version` / `effective_from`.
+- [x] Offline script assigns buckets on historical Parquet; **frequency table** reviewed (no empty or 1-row buckets without justification).
+- [x] **At least one** bucket policy differs from global default; **Strategy Tester** shows intended effect (filter @ 0.63 blocks vs fixed 0.65 path documented in `CHANGELOG-adaptive.md`).
+- [x] **Phase 4 API** returns effective threshold (and logs `bucket_id`) on `/score` or dedicated **`POST /policy`**.
+- [x] **Change log** + **manual retrain calendar** (e.g. quarterly) + **rollback** rule documented (`CHANGELOG-adaptive.md`, `cts_ml/docs/adaptive_ops.md`).
+
+**Deployment (live chart + API) deferred** until EA performance is stable in tester; see `CHANGELOG-adaptive.md` tester sign-off table.
+
+### 7.3 Weekly implementation plan (Phase 5 — adaptive controls)
+
+Work **in order**. Each week ends with a **host demo** (script + JSON/YAML artifact) and, from Week 4 onward, optional **EA journal** lines. Merge weeks if schedule is tight — do not skip §7.2 checks.
 
 | Week | Focus | Deliverables | Exit (that week) |
 |------|--------|--------------|------------------|
-| **1** | **Regime buckets** | Define **buckets** (e.g. ATR quartiles from logged `atr1`, or output of optional Phase 3 regime model); map each live bar to a **bucket id**; document in **`configs/adaptive_v1.yaml`** (or similar). | Bucketing script reproduces bucket labels on **historical** dataset; table of frequencies. |
-| **2** | **Threshold / risk table** | For each bucket: **AI threshold** and/or **risk multiplier** (static table v1—no online learning); implement read path in **host service** or **EA inputs** (your choice—prefer **host** if Phase 4 API exists). | Backtest or forward evidence: **at least one** bucket change shows intended effect vs global default. |
-| **3** | **Release + cadence** | **Change log** per parameter change; **manual retrain** calendar (e.g. quarterly); rollback rule if metrics degrade. | Phase 5 **exit criteria** met: documented rules + evidence links (run ids / reports). |
+| **1** | **Bucket spec** | Choose **primary** bucket axis: **`atr_quartile`** (from logged `atr1`) and/or **`regime_rule_v1`** (`trend_long` / `trend_short` / `chop`). Add **`configs/adaptive_v1.yaml`** skeleton: `bucket_mode`, quartile cutpoints (fit on train split only), regime version. Reuse **`scripts/regime_rules.py`** + **`scripts/augment_regime_column.py`** on Parquet. | `adaptive_v1.yaml` committed; `python scripts/augment_regime_column.py …` (or new **`assign_buckets.py`**) prints bucket counts on train/val slices. |
+| **2** | **Evidence + policy table** | **`scripts/analyze_buckets.py`** (or notebook): per-bucket **fill rate**, proxy **+1R**, PR-AUC slice from existing metrics / booster **`*_bucket_stats.json`**. Fill **`policies:`** in YAML: `threshold`, optional `risk_multiplier` per bucket (static — no learning loop). Document **rationale** in YAML comments or **`docs/adaptive_v1.md`** (one page). | Table shows ≥2 buckets with meaningfully different outcomes; at least **one** bucket policy ≠ global `0.65` threshold. |
+| **3** | **Host loader + API** | **`phase4_api/adaptive.py`** (or `policy_loader.py`): load YAML at startup; **`resolve_policy(features) → {bucket_id, threshold, risk_multiplier}`**. Extend **`POST /score`** response with `bucket_id`, `threshold` (effective), optional `risk_multiplier`; or add **`GET /policy?...`**. Env: **`CTS_ADAPTIVE_CONFIG`**. Tests: **`scripts/test_phase5_week3.py`**. | `curl` / TestClient: same feature row → stable `bucket_id` + threshold; `/health` reports adaptive config version. |
+| **4** | **EA shadow (adaptive log only)** | **`CTS_AiGate`**: parse API `threshold` / `bucket_id` from JSON (use **server effective threshold** for allow/deny when filter on). Journal: `bucket=… thr_eff=…`. **Shadow only** — do not change lots yet unless risk_multiplier wired with explicit input. Tester: mock bucket via API or extend mock path later. | Visual/tester: AiGate lines include `bucket_id` + effective threshold; trades unchanged in **shadow** vs Week 4 baseline. |
+| **5** | **Filter + risk (optional) + release** | Enable **filter** with adaptive threshold on live chart (after shadow). Optional: apply **`risk_multiplier`** in `CTS_Risk` / sizing path with clamps. **`CHANGELOG-adaptive.md`** or repo release notes; **retrain calendar**; rollback = revert YAML + restart uvicorn. Re-run tester **mock** filter with bucket-forcing scores if needed. | §7.2 exit criteria met; linked tester run id or report path in changelog. |
+
+**Optional Week 6 (stretch):** session bucket (`hour_utc` bins) or symbol-specific policy tables — only after Week 5 is stable.
+
+### 7.4 Week-by-week task checklist (Phase 5)
+
+Use as a **sequenced backlog** under §7.3.
+
+**Week 1 — Bucket spec**
+
+- **Implemented (repo):** **`configs/adaptive_v1.yaml`**, **`scripts/adaptive_buckets.py`**, **`scripts/assign_buckets.py`**; runbook **`cts_ml/README.md`** Phase 5 Week 1.
+- [x] Lock bucket axis: **`combined`** (default in YAML).
+- [x] Run `assign_buckets.py` on merged Parquet; train/val frequency table reviewed.
+- [x] Exit: **`atr_quartile.edges`** (3 floats) in YAML; optional local **`cts_dataset_adaptive_v1.parquet`**.
+
+**Week 2 — Policy table from evidence**
+
+- **Implemented (repo):** **`scripts/analyze_buckets.py`**, **`docs/adaptive_v1.md`**, README Week 2.
+- [x] Run `analyze_buckets.py --write-policies` on adaptive Parquet.
+- [x] Exit: **`policies.by_bucket`** (9 keys); ≥1 threshold ≠ `0.65`.
+
+**Week 3 — API integration**
+
+- **Implemented (repo):** **`phase4_api/adaptive.py`**, extended **`app.py`** / **`schemas.py`**, **`test_phase5_week3.py`**, **`.env.example`**.
+- [x] Policy loader; restart uvicorn on YAML change (no hot-reload v1).
+- [x] Wire into `phase4_api/app.py`; extend `ScoreOut` schema.
+- [x] `CTS_ADAPTIVE_CONFIG` in `.env.example`.
+- [x] Exit: `test_phase5_week3.py` green.
+
+**Week 4 — EA shadow**
+
+- **Implemented (repo):** **`CTS_AiGate.mqh`**, **`CTS.mq5` v1.12+**, **`test_phase5_week4.py`**.
+- [x] Parse `bucket_id`, effective `threshold` from `/score` JSON.
+- [x] Filter: `score >= thr_eff` (API/mock effective threshold).
+- [x] Tester mock: journal `bucket=` + `thr_eff=`; shadow fill count = baseline (**4855.80**).
+
+**Week 5 — Release + cadence (tester; live deferred)**
+
+- **Implemented (repo):** risk multiplier path, **`CHANGELOG-adaptive.md`**, **`adaptive_ops.md`**, **`test_phase5_week5.py`**.
+- [x] Tester evidence: filter @ **0.63** vs **0.65** (`CHANGELOG-adaptive.md` 13:37 run).
+- [x] `risk_multiplier` with lot clamps (`InpAiApplyRiskMultiplier`).
+- [x] Changelog + quarterly checklist + rollback documented.
+- [x] Exit: §7.2 met for **repo + tester**; live chart deferred.
+
+**Week 6 — Session buckets (optional stretch)**
+
+- **Implemented (repo):** **`scripts/session_buckets.py`**, **`configs/adaptive_session_v1.yaml`** skeleton (not wired to API/EA).
+- [ ] Re-run on larger Parquet after major tester CSV loads; decide if session axis promotes to `adaptive_v2.yaml`.
+
+### 7.5 Planned artifacts (Phase 5)
+
+```
+cts_ml/
+├── configs/
+│   └── adaptive_v1.yaml          # buckets + per-bucket threshold / risk_multiplier
+├── phase4_api/
+│   ├── adaptive.py               # Week 3 — resolve bucket + policy
+│   └── app.py                    # extend /score or /policy
+├── scripts/
+│   ├── assign_buckets.py         # Week 1 — optional wrapper
+│   ├── analyze_buckets.py        # Week 2 — evidence tables
+│   └── test_phase5_week3.py      # Week 3 — API tests
+└── docs/
+    └── adaptive_v1.md            # Week 2 — optional one-pager
+```
+
+**Existing reuse (Phase 3):** `scripts/regime_rules.py`, `scripts/augment_regime_column.py`, booster `*_bucket_stats.json` from Week 4.
 
 ---
 
@@ -327,7 +422,7 @@ Only start after **Phase 4** (or **Phase 3** + explicit decision to skip live AP
 - **Phase 2:** **§4.5** (five weekly blocks). Treat earlier **2a/2b** sprint language as optional shorthand—do not maintain two competing Phase 2 plans.
 - **Phase 3:** **§5.5** (five core weeks + optional Week 6 regime / robustness).
 - **Phase 4:** **§6.5** (four weekly blocks; optional—skip if you do not deploy live scoring).
-- **Phase 5:** **§7.1** (three weekly blocks; only if adaptive controls add value after Phase 4).
+- **Phase 5:** **§7.3** (five weekly blocks + optional Week 6 stretch; only if adaptive controls add value after Phase 4).
 
 ---
 
@@ -475,4 +570,8 @@ Exact column order for `CTS_SIGNALS_*.csv` (row 1 = header):
 | 1.22 | 2026-05-15 | **Phase 4 Week 1**: `cts_ml/phase4_api/` FastAPI **`/health`** + **`/score`**; **`requirements_phase4.txt`**, **`.env.example`**, **`scripts/smoke_phase4_api.py`**; README Phase 4 runbook; **§6.5.1** Week 1 bullets; **`.gitignore`** `phase4_api/.env`. |
 | 1.23 | 2026-05-15 | **Phase 4 Week 2**: **`GET /features`**, **`inference_ms`**, **422/504**, **`CTS_SCORE_TIMEOUT_MS`**; **`test_phase4_week2.py`**, **`phase4_score_client.py`**; README Week 2; **§6.5.1** Week 2 bullets. |
 | 1.24 | 2026-05-15 | **Phase 4 Week 3**: **`CTS_AiGate.mqh`**, **`CTS.mq5` v1.08** shadow **`WebRequest`**; README Week 3 compile/test; **§6.5.1** Week 3. |
+| 1.25 | 2026-05-15 | **Phase 4 Week 4**: filter path + fail-safe; **`InpAiMockScoreInTester`**; **`CTS.mq5` v1.10**; README Week 4 compile/test; **§6.5.1** Week 4. |
+| 1.26 | 2026-05-15 | **Phase 5**: expanded **§7.1–§7.5** — five-week adaptive plan, exit criteria, task checklist, planned artifacts; §8 timeline updated. |
+| 1.27 | 2026-05-15 | **Phase 5 Week 1**: **`configs/adaptive_v1.yaml`**, **`adaptive_buckets.py`**, **`assign_buckets.py`**; README Week 1; §7.4 Week 1 bullets. |
+| 1.28 | 2026-05-15 | **Phase 5 Week 2**: **`analyze_buckets.py`**, **`docs/adaptive_v1.md`**, policy table in YAML; README Week 2; §7.4 Week 2. |
 

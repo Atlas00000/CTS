@@ -17,9 +17,10 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from phase4_api.adaptive import AdaptivePolicyResolver, load_resolver
 from phase4_api.errors import MissingFeaturesError
 from phase4_api.model_loader import load_bundle
-from phase4_api.schemas import ErrorDetail, FeaturesOut, HealthOut, ScoreOut
+from phase4_api.schemas import ErrorDetail, FeaturesOut, HealthOut, PolicyOut, ScoreOut
 from phase4_api.scorer import score_positive_proba
 
 _DIR = Path(__file__).resolve().parent
@@ -43,6 +44,7 @@ class Settings(BaseSettings):
     CTS_API_PORT: int = 8008
     CTS_MANIFEST_PATH: Path | None = None
     CTS_SCORE_TIMEOUT_MS: int = 200
+    CTS_ADAPTIVE_CONFIG: Path | None = None
 
 
 def _resolve_under_cts_ml(p: Path) -> Path:
@@ -55,6 +57,7 @@ class AppState:
     settings: Settings | None = None
     clf: Any | None = None
     manifest: dict[str, Any] | None = None
+    adaptive: AdaptivePolicyResolver | None = None
     load_error: str | None = None
 
 
@@ -70,6 +73,13 @@ def _require_model() -> tuple[Settings, Any, dict[str, Any]]:
             detail=state.load_error or "Model not loaded",
         )
     return state.settings, state.clf, state.manifest
+
+
+def _effective_threshold(body: dict[str, Any], fallback: float) -> tuple[float, dict[str, Any] | None]:
+    if state.adaptive is None:
+        return fallback, None
+    pol = state.adaptive.resolve(body)
+    return float(pol["threshold"]), pol
 
 
 def _run_score(clf: Any, manifest: dict[str, Any], body: dict[str, Any]) -> float:
@@ -96,10 +106,15 @@ async def lifespan(app: FastAPI):
             else None
         )
         state.clf, state.manifest = load_bundle(model_path=model_p, manifest_path=man_p)
+        state.adaptive = None
+        if state.settings.CTS_ADAPTIVE_CONFIG is not None:
+            adapt_p = _resolve_under_cts_ml(state.settings.CTS_ADAPTIVE_CONFIG)
+            state.adaptive = load_resolver(adapt_p)
         state.load_error = None
     except Exception as e:  # noqa: BLE001
         state.clf = None
         state.manifest = None
+        state.adaptive = None
         state.load_error = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
     yield
     _score_pool.shutdown(wait=False, cancel_futures=True)
@@ -107,9 +122,9 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="CTS Phase 4 scorer",
-    version="0.2.0",
+    version="0.3.0",
     lifespan=lifespan,
-    description="Local y_has_fill model endpoint for EA shadow/filter (AI_integration.md §6).",
+    description="Local y_has_fill model + optional adaptive thresholds (AI_integration.md §6–§7).",
 )
 
 
@@ -149,6 +164,7 @@ def health() -> HealthOut:
             threshold=0.65,
             host="127.0.0.1",
             port=8008,
+            adaptive_enabled=False,
         )
     loaded = state.clf is not None and state.manifest is not None
     model_p = _resolve_under_cts_ml(s.CTS_PHASE3_MODEL)
@@ -156,6 +172,11 @@ def health() -> HealthOut:
         _resolve_under_cts_ml(s.CTS_MANIFEST_PATH)
         if s.CTS_MANIFEST_PATH
         else (model_p.parent / "manifest.json")
+    )
+    adapt_p = (
+        str(_resolve_under_cts_ml(s.CTS_ADAPTIVE_CONFIG))
+        if s.CTS_ADAPTIVE_CONFIG is not None
+        else None
     )
     return HealthOut(
         ok=loaded and state.load_error is None,
@@ -166,6 +187,9 @@ def health() -> HealthOut:
         threshold=s.CTS_AI_THRESHOLD,
         host=s.CTS_API_HOST,
         port=s.CTS_API_PORT,
+        adaptive_enabled=state.adaptive is not None,
+        adaptive_config_path=adapt_p,
+        adaptive_version=state.adaptive.version if state.adaptive else None,
     )
 
 
@@ -201,10 +225,28 @@ def score(body: Annotated[dict[str, Any], Body(...)]) -> ScoreOut:
         raise HTTPException(status_code=500, detail=f"score_error: {type(e).__name__}: {e}") from e
 
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
-    thr = float(s.CTS_AI_THRESHOLD)
+    thr, pol = _effective_threshold(body, float(s.CTS_AI_THRESHOLD))
     return ScoreOut(
         score=p,
         threshold=thr,
         would_allow=p >= thr,
         inference_ms=round(elapsed_ms, 3),
+        bucket_id=pol["bucket_id"] if pol else None,
+        risk_multiplier=pol["risk_multiplier"] if pol else None,
+        regime_rule_v1=pol["regime_rule_v1"] if pol else None,
+        atr_quartile=pol["atr_quartile"] if pol else None,
+    )
+
+
+@app.post("/policy", response_model=PolicyOut)
+def policy(body: Annotated[dict[str, Any], Body(...)]) -> PolicyOut:
+    if state.adaptive is None:
+        raise HTTPException(status_code=503, detail="adaptive_config_not_loaded")
+    pol = state.adaptive.resolve(body)
+    return PolicyOut(
+        bucket_id=pol["bucket_id"],
+        threshold=pol["threshold"],
+        risk_multiplier=pol["risk_multiplier"],
+        regime_rule_v1=pol["regime_rule_v1"],
+        atr_quartile=pol["atr_quartile"],
     )

@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026"
 #property link      ""
-#property version   "1.08"
+#property version   "1.16"
 
 #include <Trade/Trade.mqh>
 
@@ -57,28 +57,41 @@ input bool              InpOnePositionTotal     = true;
 input double            InpMinEquity           = 0.0;
 
 input group "Logging (Phase 2)"
-input bool              InpLogCsvEnable        = false;
+input bool              InpLogCsvEnable        = true;   // default: on for tester CSV + ML pipeline
 input bool              InpLogCsvTestRow       = true;
 input string            InpLogCsvSubdir        = "CTS_logs";
 input bool              InpLogSignals          = true;   // Week 2+: signal rows
-input bool              InpLogOrders           = false;  // Week 3+: execution rows
-input bool              InpLogInTester         = false;  // Week 3: allow CSV in Strategy Tester (else no file I/O)
-input int               InpLogTesterMaxRows    = 0;       // Tester row cap (signals+executions); 0 = unlimited (full long backtests); set >0 for optimization disk safety
+input bool              InpLogOrders           = true;   // Week 3+: execution rows
+input bool              InpLogInTester         = true;   // Strategy Tester -> CTS_logs_tester
+input int               InpLogTesterMaxRows    = 0;       // 0 = unlimited (full long backtests)
 input string            InpLogTesterSubdir     = "CTS_logs_tester";
 
 input group "AI gate (Phase 4)"
-input bool              InpUseAiGate            = false;
-input bool              InpAiShadowMode         = true;   // true = log only; false = filter (Week 4 policy)
-input bool              InpUseAiGateInTester    = false;  // no WebRequest in tester by default
-input string            InpAiEndpoint           = "http://127.0.0.1:8008/score";
-input int               InpAiTimeoutMs          = 500;
-input double            InpAiThreshold          = 0.65;   // logged; server uses CTS_AI_THRESHOLD
+input bool                  InpUseAiGate            = false;  // dev default: EA runs without AI; enable for Phase 4/5 tests
+input ENUM_CTS_AI_GATE_MODE InpAiGateMode           = CTS_AI_SHADOW;
+input bool                  InpUseAiGateInTester    = false;
+input double                InpAiMockScoreInTester  = -1.0;   // tester mock: 0..1, or <0 = off
+input double                InpAiMockThresholdInTester = -1.0;
+input string                InpAiMockBucketInTester = "";
+input double                InpAiMockRiskMultiplierInTester = -1.0;
+input bool                  InpAiApplyRiskMultiplier  = false;
+input double                InpAiRiskMultMin          = 0.50;
+input double                InpAiRiskMultMax          = 1.50;
+input string                InpAiEndpoint           = "http://127.0.0.1:8008/score";
+input int                   InpAiTimeoutMs          = 500;
+input double                InpAiThreshold          = 0.65;     // EA fallback; filter uses API thr_eff when present
 
 input group "Debug"
 input bool              InpVerboseLog          = true;
 
 //---
 CTrade g_trade;
+
+//+------------------------------------------------------------------+
+bool CTS_AiGate_IsShadowMode(const ENUM_CTS_AI_GATE_MODE mode)
+  {
+   return (mode == CTS_AI_SHADOW);
+  }
 
 //+------------------------------------------------------------------+
 string CTS_WorkSymbol()
@@ -202,6 +215,36 @@ bool CTS_ValidateInputs(string &err)
          err = ae;
          return false;
         }
+      string me = "";
+      if(!CTS_AiGate_ValidateMockScore(InpAiMockScoreInTester, me))
+        {
+         err = me;
+         return false;
+        }
+      if(!CTS_AiGate_ValidateMockScore(InpAiMockThresholdInTester, me))
+        {
+         err = "AiGate mock effective threshold: " + me;
+         return false;
+        }
+      if(InpAiMockRiskMultiplierInTester >= 0.0)
+        {
+         if(InpAiMockRiskMultiplierInTester < InpAiRiskMultMin || InpAiMockRiskMultiplierInTester > InpAiRiskMultMax)
+           {
+            err = StringFormat("AiGate mock risk_multiplier must be in [%.2f, %.2f] or <0 off",
+                               InpAiRiskMultMin, InpAiRiskMultMax);
+            return false;
+           }
+        }
+      if(InpAiRiskMultMin <= 0.0 || InpAiRiskMultMax < InpAiRiskMultMin)
+        {
+         err = "AiGate risk mult clamps: need 0 < min <= max";
+         return false;
+        }
+      if(InpAiThreshold < 0.0 || InpAiThreshold > 1.0)
+        {
+         err = "AiGate threshold must be in [0,1]";
+         return false;
+        }
      }
    return true;
   }
@@ -253,14 +296,34 @@ bool CTS_TryOpen(const bool is_long, const CTSPriceBuf &buf, const string sym, c
          return false;
         }
      }
-   else
-     {
+     else
+      {
       if(!CTS_NormalizeVolume(sym, lots))
         {
          Print("CTS: fixed volume normalize failed");
          return false;
         }
      }
+
+   if(InpUseAiGate && InpAiApplyRiskMultiplier)
+     {
+      const double rm = CTS_AiGate_ConsumeRiskMultiplier();
+      if(MathAbs(rm - 1.0) > 1e-6)
+        {
+         const double lots_before = lots;
+         if(!CTS_ApplyRiskMultiplier(sym, lots, rm, InpAiRiskMultMin, InpAiRiskMultMax, e2))
+           {
+            PrintFormat("CTS: risk_multiplier %.3f skipped: %s (lots=%.2f)", rm, e2, lots_before);
+            lots = lots_before;
+           }
+         else
+           {
+            CTS_LogV(InpVerboseLog, StringFormat("CTS: lots %.2f -> %.2f (risk_mult=%.3f)", lots_before, lots, rm));
+           }
+        }
+     }
+   else
+      CTS_AiGate_ConsumeRiskMultiplier();
 
    string send_err = "";
    ulong deal_ticket = 0;
@@ -314,7 +377,25 @@ int OnInit()
 
    PrintFormat("CTS: initialized sym=%s tf=%s", sym, EnumToString(tf));
    if(InpUseAiGate)
-      Print("CTS AiGate: enable Tools -> Options -> Expert Advisors -> Allow WebRequest for listed URL: http://127.0.0.1:8008");
+     {
+      if(CTS_AiGate_UseMockInTester(InpUseAiGate, InpAiMockScoreInTester))
+        {
+         const double mthr = (InpAiMockThresholdInTester >= 0.0) ? InpAiMockThresholdInTester : InpAiThreshold;
+         PrintFormat("CTS AiGate: tester MOCK score=%.4f thr_eff=%.4f bucket=%s (no HTTP)",
+                     InpAiMockScoreInTester, mthr,
+                     (StringLen(InpAiMockBucketInTester) > 0) ? InpAiMockBucketInTester : "-");
+        }
+      else if(MQLInfoInteger(MQL_TESTER) != 0 && !InpUseAiGateInTester)
+         Print("CTS AiGate: inactive in tester (set mock score 0..1 or InpUseAiGateInTester=true)");
+      else
+         Print("CTS AiGate: allow Tools -> Options -> Expert Advisors -> WebRequest URL http://127.0.0.1:8008");
+      if(InpAiGateMode == CTS_AI_FILTER)
+         PrintFormat("CTS AiGate: FILTER — skip when score < thr_eff (API per-bucket or %.4f fallback); HTTP errors skip trade", InpAiThreshold);
+      else
+         Print("CTS AiGate: SHADOW — bucket/thr_eff logged; trades not blocked by AI");
+      if(InpAiApplyRiskMultiplier)
+         PrintFormat("CTS AiGate: risk_multiplier ON — lots scaled in [%.2f, %.2f]", InpAiRiskMultMin, InpAiRiskMultMax);
+     }
    return INIT_SUCCEEDED;
   }
 
@@ -375,11 +456,12 @@ void OnTick()
    if(sig_long)
      {
       CTS_LogV(InpVerboseLog, "CTS: LONG signal");
-      string ai_log = "";
-      if(!CTS_AiGate_HandleBeforeOpen(InpUseAiGate, InpUseAiGateInTester, InpAiShadowMode,
-                                      InpAiEndpoint, InpAiTimeoutMs, InpAiThreshold,
+      string ai_log = "", ai_reason = "";
+      if(!CTS_AiGate_HandleBeforeOpen(InpUseAiGate, InpUseAiGateInTester, InpAiMockScoreInTester,
+                                      InpAiMockThresholdInTester, InpAiMockBucketInTester, InpAiMockRiskMultiplierInTester,
+                                      CTS_AiGate_IsShadowMode(InpAiGateMode), InpAiEndpoint, InpAiTimeoutMs, InpAiThreshold,
                                       sym, tf, buf, bias_long, bias_short, sig_long, sig_short,
-                                      signal_id, true, InpVerboseLog, ai_log))
+                                      signal_id, true, InpVerboseLog, ai_log, ai_reason))
          return;
       CTS_TryOpen(true, buf, sym, tf, signal_id);
       return;
@@ -388,11 +470,12 @@ void OnTick()
    if(sig_short)
      {
       CTS_LogV(InpVerboseLog, "CTS: SHORT signal");
-      string ai_log = "";
-      if(!CTS_AiGate_HandleBeforeOpen(InpUseAiGate, InpUseAiGateInTester, InpAiShadowMode,
-                                      InpAiEndpoint, InpAiTimeoutMs, InpAiThreshold,
+      string ai_log = "", ai_reason = "";
+      if(!CTS_AiGate_HandleBeforeOpen(InpUseAiGate, InpUseAiGateInTester, InpAiMockScoreInTester,
+                                      InpAiMockThresholdInTester, InpAiMockBucketInTester, InpAiMockRiskMultiplierInTester,
+                                      CTS_AiGate_IsShadowMode(InpAiGateMode), InpAiEndpoint, InpAiTimeoutMs, InpAiThreshold,
                                       sym, tf, buf, bias_long, bias_short, sig_long, sig_short,
-                                      signal_id, false, InpVerboseLog, ai_log))
+                                      signal_id, false, InpVerboseLog, ai_log, ai_reason))
          return;
       CTS_TryOpen(false, buf, sym, tf, signal_id);
       return;

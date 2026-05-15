@@ -65,6 +65,33 @@ inline bool CTS_ComputeVolumeForRisk(const string sym, const bool is_buy,
    return true;
   }
 
+// Phase 5 — scale lots by adaptive risk_multiplier (clamped), then broker normalize.
+inline bool CTS_ApplyRiskMultiplier(const string sym, double &lots,
+                                    const double risk_multiplier,
+                                    const double mult_min,
+                                    const double mult_max,
+                                    string &err)
+  {
+   err = "";
+   if(risk_multiplier <= 0.0)
+     {
+      err = "risk_multiplier must be > 0";
+      return false;
+     }
+   double m = risk_multiplier;
+   if(mult_min > 0.0 && m < mult_min)
+      m = mult_min;
+   if(mult_max > 0.0 && m > mult_max)
+      m = mult_max;
+   lots *= m;
+   if(!CTS_NormalizeVolume(sym, lots))
+     {
+      err = "volume below minimum after risk_multiplier";
+      return false;
+     }
+   return true;
+  }
+
 inline bool CTS_ComputeStops(const string sym, const bool is_buy,
                              const ENUM_CTS_SL_MODE sl_mode,
                              const int sl_points,
