@@ -12,6 +12,7 @@ import json
 import sys
 from pathlib import Path
 
+import joblib
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
@@ -84,6 +85,12 @@ def main() -> int:
         default=None,
         help="Write metrics JSON (default: print only)",
     )
+    ap.add_argument(
+        "--out-model",
+        type=Path,
+        default=None,
+        help="Write fitted sklearn Pipeline (joblib) for export_phase3_bundle.py",
+    )
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -132,6 +139,12 @@ def main() -> int:
 
     clf = make_pipeline(args.model, args.seed)
     clf.fit(X_tr, y_tr)
+
+    if args.out_model is not None:
+        args.out_model.parent.mkdir(parents=True, exist_ok=True)
+        joblib.dump(clf, args.out_model)
+        if args.verbose:
+            print(f"Wrote model {args.out_model}", file=sys.stderr)
 
     train_metrics = mlc.eval_split("train", clf, X_tr, y_tr)
     val_metrics = mlc.eval_split("validation", clf, X_va, y_va)

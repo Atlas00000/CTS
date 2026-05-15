@@ -85,6 +85,16 @@ def main() -> int:
             "joblib": _pkg_ver("joblib"),
         },
         "phase4_hint": "Load model.joblib with joblib; score one row DataFrame with feature_columns (see inference_score_row.py).",
+        "optional_derived_columns_in_dataset": [
+            "fill_side",
+            "fill_sl",
+            "fill_tp",
+            "forward_close_1",
+            "initial_r_price",
+            "plus_1r_price",
+            "minus_1r_price",
+            "y_proxy_1bar_close_ge_plus_1r",
+        ],
     }
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 

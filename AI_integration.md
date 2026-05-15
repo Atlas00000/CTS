@@ -173,7 +173,7 @@ Work **in order**; each week should end with something you can **demo or verify*
 |------|--------|--------------|------------------|
 | **1** | **Spec + wiring shell** | Freeze **v1** column list and `schema_version`; add **input group**; create `Include/CTS_LogCsv.mqh` with **header write** + optional **test row** from `OnInit`; document **§11.1** time rules in `cts_ml/README.md`. | EA compiles; log **off** = zero file I/O; log **on** = `CTS_SIGNALS_YYYY-MM-DD.csv` with **§11.4** header under `MQL5/Files/<subdir>/`. |
 | **2** | **Signal rows (new bar)** | On **each new bar** of the signal TF, append **one signal row** per §4.2A / §11.4 (`CTS_LogCsv_AppendSignalRow`); buffered write + flush per row; UTC **day rollover** reopens file. | **Done in code (v1.03):** one row per bar including **both_signals** / no-signal cases; `signal_id` + OHLC + biases. |
-| **3** | **Tester + execution rows** | Default **`MQL_TESTER`** → logging **OFF** or subfolder + **row cap** input to avoid huge optimizations; when ON, same schema. On **successful** `CTS_OpenMarket` / send path, append **execution row** §4.2B (`ticket`, side, volume, SL/TP, `retcode`, wall time). | **Done in code (v1.04):** `InpLogInTester` / `InpLogTesterSubdir` / `InpLogTesterMaxRows`; `CTS_EXECUTIONS_<UTCday>.csv` when `InpLogOrders`; execution `signal_id` matches signal rows; tester cap counts signal + execution rows. |
+| **3** | **Tester + execution rows** | Default **`MQL_TESTER`** → logging **OFF** or subfolder + **row cap** input to avoid huge optimizations; when ON, same schema. On **successful** `CTS_OpenMarket` / send path, append **execution row** §4.2B (`ticket`, side, volume, SL/TP, `retcode`, wall time). | **Done in code (v1.04+):** `InpLogInTester` / `InpLogTesterSubdir` / `InpLogTesterMaxRows`; `CTS_EXECUTIONS_<UTCday>.csv` when `InpLogOrders`; execution `signal_id` matches signal rows; tester cap counts signal + execution rows. **v1.07:** execution CSV **v2** adds **`entry_price`** (ASK/BID at send) for offline R labels; **`003_cts_orders_entry_price.sql`** + loader accept legacy v1 execution files. |
 | **4** | **Docker Postgres + DDL** | Add **`cts_ml/docker-compose.yml`** + **`.env.example`**; `sql/migrations/001_init_cts_logging.sql` for `cts_signals` / `cts_orders` (or one table + `row_type`—match your CSV); `docker compose up -d`; verify `psql` or GUI from host to `127.0.0.1`. | **Done (repo):** Compose `postgres:16.6-bookworm`, `127.0.0.1` bind, named volume, init DDL from `sql/migrations/001_init_cts_logging.sql`; `cts_ml/README.md` runbook + `\dt` / re-apply notes. **Local exit:** `docker compose up -d` + `psql` succeeds on your machine. |
 | **5** | **Load pipeline + hardening** | Implement **`scripts/load_csv_to_postgres.py`**: idempotent append or run-id column; `COPY` or batched insert; document **DSN** in `configs/.env.example`; README: compose up, load command, **backup** (`pg_dump` / volume). **Performance pass:** batch size, flush interval; confirm tick path still “light.” | **Done (repo):** batched multi-row `INSERT … ON CONFLICT DO NOTHING` (`002` unique indexes); `configs/.env.example`; `requirements.txt`; README runbook; EA tick path unchanged (loader offline). **Local exit:** `pip install -r requirements.txt` + load a real CSV + `SELECT COUNT(*)`. |
 
@@ -210,9 +210,9 @@ Work **in order**; each week should end with something you can **demo** (script 
 
 | Week | Focus | Deliverables | Exit (that week) |
 |------|--------|--------------|------------------|
-| **1** | **Label + join spec** | Repo: **`cts_ml/labeling.md`** + **`cts_ml/sql/examples/join_signals_orders_example.sql`** — **label** (`has_fill` vs future +1R and `entry_price` bump), **horizon**, **entry reference**, **partial fills** / **missing deals**. | Edit `params` in the example SQL; query returns the chosen `signal_id` row with **`has_fill`**; spec has no ambiguous default label. |
-| **2** | **Dataset build** | **`cts_ml/scripts/build_dataset.py`**: Postgres **`cts_signals` ⟕ `cts_orders`**, label **`y_has_fill`**, default **`would_trade = true`**; **Parquet** or **CSV** under **`cts_ml/data/`** (gitignored); **QC** (nulls, OHLC, dup `signal_id`). | `python scripts/build_dataset.py --dry-run` then default write; row count vs `SELECT COUNT(*) FROM cts_signals WHERE would_trade` matches stderr summary. |
-| **3** | **Walk-forward + baseline** | **`cts_ml/scripts/train_baseline.py`**: sort **`ts_gmt`**; split **`configs/baseline_split_v1.yaml`** (by row index after sort) + optional **`purge_hours`**; **`RandomForestClassifier`** or **`LogisticRegression`**; metrics **PR-AUC**, **Brier**, **log_loss** on train vs validation; **`--write-split-config`** to re-freeze YAML. | `python scripts/train_baseline.py` on current Parquet prints JSON; validation metrics finite; split YAML committed / updated when row count changes. |
+| **1** | **Label + join spec** | Repo: **`cts_ml/labeling.md`** + **`cts_ml/sql/examples/join_signals_orders_example.sql`** — **`y_has_fill`** (§5.C), optional **R / PnL** targets when **`fill_entry_price`** / **`cts_orders.entry_price`** is present (execution CSV v2), **horizon**, **entry reference**, **partial fills** / **missing deals**. | Edit `params` in the example SQL; query returns the chosen `signal_id` row with **`has_fill`**; spec has no ambiguous default label. |
+| **2** | **Dataset build** | **`cts_ml/scripts/build_dataset.py`**: Postgres **`cts_signals` ⟕ `cts_orders`**, label **`y_has_fill`**, **`fill_*`** order columns, **`forward_close_1`**, R geometry (**`initial_r_price`**, **`plus_1r_price`**, **`minus_1r_price`**), optional **`y_proxy_1bar_close_ge_plus_1r`** (`labeling.md` §5.D); default **`would_trade = true`**; **Parquet** or **CSV** under **`cts_ml/data/`** (gitignored); **QC**. | `python scripts/build_dataset.py --dry-run` then default write; row count matches `SELECT COUNT(*) FROM cts_signals WHERE would_trade`; no duplicate **`signal_id`**. |
+| **3** | **Walk-forward + baseline** | **`cts_ml/scripts/train_baseline.py`**: sort **`ts_gmt`**; split **`configs/baseline_split_v1.yaml`** (by row index after sort) + optional **`purge_hours`**; **`RandomForestClassifier`** or **`LogisticRegression`**; metrics **PR-AUC**, **Brier**, **log_loss**; **`--write-split-config`** to re-freeze YAML; optional **`--out-model`** **`.joblib`** for **`export_phase3_bundle.py`**. | `python scripts/train_baseline.py` on current Parquet prints JSON; validation metrics finite; split YAML committed / updated when row count changes. |
 | **4** | **Primary booster** | **`cts_ml/scripts/train_booster.py`**: **XGBoost** (fixed hyperparams + `scale_pos_weight`); same split as Week 3; **RF reference** on validation; **calibration CSV** (`calibration_curve`); **bucket** stats (`symbol`, **ATR quartiles**); artifacts **`*_metrics.json`**, **`*_calibration_val.csv`**, **`*_xgb.joblib`**. Shared split/features: **`scripts/ml_common.py`**. | `python scripts/train_booster.py` completes; JSON reports `comparison` vs RF; calibration + model files exist. “Beats baseline” is **informational** on small `n`. |
 | **5** | **Export + handoff** | **`scripts/export_phase3_bundle.py`**: **`model.joblib`** + **`manifest.json`** (features, label ref, versions); optional metrics/calibration → **`cts_ml/exports/phase3_v1/`** (gitignored). **`scripts/inference_score_row.py`**: score one row via **`--row-json`** or **`--from-parquet`**. **`requirements.txt`** pinned tighter + **`joblib`**. Native joblib path only (no ONNX). | Export + inference run; Phase 4 loads **`exports/phase3_v1/model.joblib`**. |
 | **6** *(optional)* | **Regime helper** | **`scripts/regime_rules.py`**: **`regime_rule_v1`** (`trend_long` / `trend_short` / `chop`) from logged EMA/MACD/bias. **`scripts/augment_regime_column.py`**: append column to Parquet. **`scripts/train_regime_model.py`**: multiclass **RF** on numeric+`symbol`/`tf` only (excludes bias/sig); same split YAML; **`validation_by_symbol`**; optional **`regime_rf_week6.joblib`**. | Augment + train complete; metrics JSON shows regime counts and val accuracy / macro-F1. |
@@ -257,6 +257,38 @@ Optional phase; skip entirely if you stop after **Phase 3**. Work **in order**; 
 | **2** | **Score endpoint** | **`POST /score`** (or `/predict`) accepts small JSON feature vector or **`signal_id`** lookup (if you add optional DB read); returns **`score`** + **`allow`**; strict **timeout** handling; unit test or scripted client. | Local script scores **≥1** real row from Phase 3 dataset in under the configured **timeout** ms. |
 | **3** | **Shadow in EA** | Add **`Include/CTS_AiGate.mqh`** + inputs (`InpUseAiFilter`, `InpAiEndpoint`, `InpAiTimeoutMs`, `InpAiThreshold`, `InpAiShadowMode`); **`WebRequest`** to localhost; **shadow mode** logs score **without** changing `CTS_TryOpen` decisions. | Forward / visual run: journal shows scores; **fills match** baseline CTS with filter **off** or shadow **on**. |
 | **4** | **Filter policy + hardening** | Enable **filter** path (`score >= threshold`); fail-safe on **timeout / HTTP error** (documented); **tester** path: disable HTTP or **mock scores file** (no real HTTP in optimization). | §6.4 exit criteria: filter changes trade count when intended; no uncaught `WebRequest` errors. |
+
+### 6.5.1 Week-by-week task checklist (Phase 4)
+
+Use this as a **sequenced backlog** under §6.5; each week ends with a concrete demo.
+
+**Week 1 — API skeleton**
+
+- Add a small Python service package (e.g. `cts_ml/phase4_api/`) with **`pyproject.toml`** or **`requirements.txt`** entries: `fastapi`, `uvicorn`, existing `joblib` / `scikit-learn`.
+- Bind **`127.0.0.1`** only; port from **env** (e.g. `CTS_AI_PORT`).
+- **`GET /health`**: returns JSON with `ok`, `model_path`, `model_loaded` boolean.
+- Load **`model.joblib`** at startup from **env** `CTS_PHASE3_MODEL` (path to bundle `model.joblib`); fail fast with clear log if missing.
+- Document **`README.md`** Phase 4: how to `uvicorn` from repo root / `cts_ml`.
+
+**Week 2 — Score endpoint**
+
+- **`POST /score`**: body = JSON object whose keys are **`manifest.json` → `feature_columns`** (same names/types as training Parquet row); response = `{ "score": <float 0..1>, "allow": <bool> }` using **positive-class probability** and optional threshold from env.
+- Validate missing keys → **422** with list of missing feature names.
+- Internal **timeout** budget (e.g. 50 ms CPU work cap per request — document; true wall-clock async timeout optional v1).
+- Smoke: `curl` or **`inference_score_row.py`**-style script calling `/score` with one row from **`cts_dataset_*.parquet`**.
+
+**Week 3 — Shadow in EA**
+
+- Add **`Include/CTS_AiGate.mqh`** (+ `CTS.mq5` include): build numeric/bool/cat feature dict from **same buffers** as logging (must match training schema).
+- Inputs: **`InpUseAiGate`**, **`InpAiEndpoint`**, **`InpAiTimeoutMs`**, **`InpAiThreshold`**, **`InpAiShadowMode`** (names can vary; behaviour per §6.3).
+- **`WebRequest`** POST to localhost; on success log **score** (journal or optional CSV column later); **never** change `CTS_TryOpen` outcome when shadow mode on.
+- Verify: with gate **off** vs **shadow on**, trade list / deal count **unchanged** on visual test.
+
+**Week 4 — Filter + hardening**
+
+- When filter mode on: if **`score >= InpAiThreshold`** proceed as baseline; else **skip open** (document exact branch next to `CTS_TryOpen`).
+- On **timeout**, **HTTP error**, or malformed JSON: apply **fail-safe** (recommend: skip trade when filter enabled); always **log** reason code.
+- Strategy Tester: **`InpAiDisableInTester`** or equivalent so optimization does not depend on HTTP unless using a **mock** file-based scorer (defer mock to “stretch” if needed).
 
 ---
 
@@ -385,6 +417,11 @@ Exact column order for `CTS_SIGNALS_*.csv` (row 1 = header):
 
 **Phase 2 Week 1 (code):** writes this header (and optional Week-1 test row). **Week 2+** fills real signal rows.
 
+**`CTS_EXECUTIONS_*.csv` (separate CSV `schema_version` in column 1):**
+
+- **v1 (legacy):** `schema_version,ts_gmt,signal_id,symbol,tf,side,volume,sl,tp,retcode,deal_ticket,deal_time_gmt` with **`schema_version = 1`**.
+- **v2 (EA ≥ 1.07):** insert **`entry_price`** after **`volume`**; first column **`schema_version = 2`**. Loader + `cts_orders.entry_price` (migration **`003_cts_orders_entry_price.sql`** on older DBs). Multi-year tester folders may mix v1 and v2 files after a recompile mid-backtest—both load.
+
 ### 11.5 `signal_id` (join key)
 
 - **Primary key** linking signal → execution → outcome rows: a **string** generated in the EA when the signal row is produced (e.g. `SYMBOL_TF_YYYYMMDD_HHMMSS_msc`). Prefer deterministic, readable IDs over random UUID unless you add a proper RNG.
@@ -428,4 +465,7 @@ Exact column order for `CTS_SIGNALS_*.csv` (row 1 = header):
 | 1.16 | 2026-05-15 | Phase 3 **Week 4**: `scripts/train_booster.py`, `scripts/ml_common.py` (shared split/features), `xgboost` in `requirements.txt`; calibration CSV + bucket JSON; README Week 4; §5.5 Week 4 row aligned. |
 | 1.17 | 2026-05-15 | Phase 3 **Week 5**: `export_phase3_bundle.py`, `inference_score_row.py`, `exports/` gitignored; tighter pins + `joblib` in `requirements.txt`; README Week 5; §5.4 Phase 3 exit checked; §5.5 Week 5 row aligned. |
 | 1.18 | 2026-05-15 | Phase 3 **Week 6 (optional)**: `regime_rules.py`, `augment_regime_column.py`, `train_regime_model.py`; README + labeling + §5.5 Week 6 row. |
+| 1.19 | 2026-05-15 | **Execution CSV v2** + **`entry_price`**: `CTS_LogCsv.mqh` / `CTS.mq5` **v1.07**; `001` + **`003_cts_orders_entry_price.sql`**; `load_csv_to_postgres.py` (v1/v2 headers); `build_dataset.py` **`fill_entry_price`**; `labeling.md` §5.B; `cts_ml/README` + **§11.4** execution headers; **§4.5** Phase 2 Week 3 row + **§5.5** Phase 3 Weeks 1–2 rows. |
+| 1.20 | 2026-05-15 | **`build_dataset.py`** dedupe join (EXISTS + LATERAL latest order); **`configs/.env`** workflow note in **`.env.example`**. |
+| 1.21 | 2026-05-15 | **R / proxy labels** in **`build_dataset.py`** (fill SL/side/TP, **`forward_close_1`**, R prices, **`y_proxy_1bar_close_ge_plus_1r`**); **`labeling.md` §5.D**; **`train_baseline.py --out-model`**; **`export_phase3_bundle`** manifest optional columns; **§6.5.1** Phase 4 weekly checklist. |
 

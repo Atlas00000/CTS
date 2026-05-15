@@ -2,12 +2,12 @@
 
 Host-side **Python** (Week 5) and **PostgreSQL in Docker** (Week 4) support the pipeline in `AI_integration.md`: MT5 writes **CSV** under `MQL5/Files/<subdir>/` (path relative to the **active data sandbox**) → bulk load → Postgres for training.
 
-## EA CSV output (v1.04)
+## EA CSV output (EA ≥ 1.07)
 
 | File pattern | When written |
 |--------------|----------------|
-| `CTS_SIGNALS_<YYYY-MM-DD>.csv` | `InpLogCsvEnable` and `InpLogSignals`; one row per new signal bar (UTC day in filename). |
-| `CTS_EXECUTIONS_<YYYY-MM-DD>.csv` | Same master switch + `InpLogOrders`; one row after each **successful** market send (`deal_ticket`, `retcode`, GMT timestamps). |
+| `CTS_SIGNALS_<YYYY-MM-DD>.csv` | `InpLogCsvEnable` and `InpLogSignals`; one row per new signal bar (UTC day in filename). **Schema v1** (`schema_version` column = 1). |
+| `CTS_EXECUTIONS_<YYYY-MM-DD>.csv` | Same master switch + `InpLogOrders`; one row after each **successful** market send (`deal_ticket`, `retcode`, GMT timestamps). **Schema v2** (`schema_version` = 2): adds **`entry_price`** after **`volume`** (ASK for BUY, BID for SELL at send). **Legacy v1** execution files (no `entry_price` column, `schema_version` = 1) still load via `scripts/load_csv_to_postgres.py`. |
 
 ### Time semantics (§11.1)
 
@@ -51,7 +51,7 @@ docker compose up -d
 - **Image:** `postgres:16.6-bookworm` (pinned).
 - **Port:** `127.0.0.1:${POSTGRES_PORT:-5432}` → container `5432` (loopback only).
 - **Volume:** named volume `cts_pgdata` for `PGDATA`.
-- **First boot:** everything under **`sql/migrations/*.sql`** is mounted into **`docker-entrypoint-initdb.d/`** (lexical order). **`001_init_cts_logging.sql`** creates **`cts_signals`** / **`cts_orders`**; **`002_idempotent_load_indexes.sql`** adds **unique** indexes for idempotent CSV loads (`ON CONFLICT DO NOTHING`).
+- **First boot:** everything under **`sql/migrations/*.sql`** is mounted into **`docker-entrypoint-initdb.d/`** (lexical order). **`001_init_cts_logging.sql`** creates **`cts_signals`** / **`cts_orders`** (including **`entry_price`** on orders); **`002_idempotent_load_indexes.sql`** adds **unique** indexes for idempotent CSV loads (`ON CONFLICT DO NOTHING`); **`003_cts_orders_entry_price.sql`** is a no-op on fresh installs and adds **`entry_price`** when upgrading an older volume.
 
 ### Verify from the host
 
@@ -73,6 +73,7 @@ Adjust `-U` / `-d` if you changed `POSTGRES_USER` / `POSTGRES_DB`.
 ```powershell
 Get-Content sql/migrations/001_init_cts_logging.sql -Raw | docker compose exec -T postgres psql -U cts_user -d ctsdb
 Get-Content sql/migrations/002_idempotent_load_indexes.sql -Raw | docker compose exec -T postgres psql -U cts_user -d ctsdb
+Get-Content sql/migrations/003_cts_orders_entry_price.sql -Raw | docker compose exec -T postgres psql -U cts_user -d ctsdb
 ```
 
 `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS` are safe to re-run.
@@ -124,7 +125,7 @@ python scripts/load_csv_to_postgres.py `
 ```
 
 ```powershell
-# Strategy Tester (example — adjust Agent-* folder to match your machine)
+# Strategy Tester — multi-year backtest: same globs match every daily file under CTS_logs_tester
 python scripts/load_csv_to_postgres.py `
   --env-file ..\configs\.env `
   --signals "C:\Users\emili\AppData\Roaming\MetaQuotes\Tester\D0E8209F77C8CF37AD8BF550E51FF075\Agent-127.0.0.1-3000\MQL5\Files\CTS_logs_tester\CTS_SIGNALS_*.csv" `
@@ -149,7 +150,7 @@ docker compose exec -T postgres psql -U cts_user -d ctsdb -c "SELECT COUNT(*) FR
 
 | Artifact | Purpose |
 |----------|---------|
-| **`labeling.md`** | Join key, cardinality, time-field caveats, **v1 label options** (`has_fill` vs future +1R with `entry_price`). |
+| **`labeling.md`** | Join key, cardinality, **`y_has_fill`**, **`fill_entry_price`**, R-distance notes (execution CSV v2). |
 | **`sql/examples/join_signals_orders_example.sql`** | `cts_signals` **LEFT JOIN** `cts_orders` for one `signal_id` (edit the `params` CTE). |
 
 **Quick test:** after CSV load, pick a `signal_id` (`SELECT signal_id FROM cts_signals ORDER BY ts_gmt DESC LIMIT 5;`), put it in the SQL file’s `params` CTE, then from **`cts_ml/`**:
@@ -164,7 +165,7 @@ Phase 3 Week 1 does **not** change the EA — compile/test MT5 as usual; DB/SQL 
 
 ## Phase 3 Week 2 (dataset build)
 
-**Script:** `scripts/build_dataset.py` — reads **`cts_signals` ⟕ `cts_orders`** from Postgres, adds **`y_has_fill`**, default filter **`would_trade = true`** (see `labeling.md` §5.C). Writes **Parquet** (default) or **CSV** under **`data/`** (gitignored).
+**Script:** `scripts/build_dataset.py` — reads **`cts_signals` ⟕ `cts_orders`** from Postgres, adds **`y_has_fill`**, order fields (**`fill_entry_price`**, **`fill_side`**, **`fill_sl`**, **`fill_tp`**), **`forward_close_1`** (next same-symbol/tf bar close), R geometry (**`initial_r_price`**, **`plus_1r_price`**, **`minus_1r_price`**), optional **`y_proxy_1bar_close_ge_plus_1r`** (see `labeling.md` §5.D); default filter **`would_trade = true`**. Writes **Parquet** (default) or **CSV** under **`data/`** (gitignored).
 
 **Prereqs:** Docker Postgres up; CSVs loaded (`load_csv_to_postgres.py`); `pip install -r requirements.txt`.
 
@@ -177,8 +178,8 @@ python scripts/build_dataset.py --env-file ..\configs\.env -v
 python scripts/build_dataset.py --env-file ..\configs\.env --all-rows --format csv -o data\cts_dataset_all.csv
 ```
 
-- **`--strict`:** exit non-zero if QC finds nulls, bad OHLC, duplicate `signal_id`, or wrong `schema_version`.
-- **EA:** unchanged — **no compile** required for Week 2; validate with **dry-run** then inspect **`data/cts_dataset_<UTCdate>.parquet`**.
+- **`--strict`:** exit non-zero if QC finds nulls (except expected nulls on optional join columns such as **`fill_entry_price`** / R geometry when no fill or legacy execution CSV), bad OHLC, duplicate `signal_id`, or wrong **signal** `schema_version`.
+- **EA:** recompile **v1.07+** if you want **`fill_entry_price`** populated from new tester runs; legacy execution CSV v1 still loads and builds a dataset with **`fill_entry_price`** null on fills. Validate with **dry-run** then inspect **`data/cts_dataset_<UTCdate>.parquet`**.
 
 ---
 
@@ -191,9 +192,11 @@ python scripts/build_dataset.py --env-file ..\configs\.env --all-rows --format c
 ```powershell
 cd cts_ml
 pip install -r requirements.txt
-python scripts/train_baseline.py --dataset data\cts_dataset_test_run.parquet --model rf --out-metrics data\baseline_metrics.json
+python scripts/train_baseline.py --dataset data\cts_dataset_test_run.parquet --model rf --out-metrics data\baseline_metrics.json --out-model data\baseline_rf.joblib
 python scripts/train_baseline.py --dataset data\cts_dataset_test_run.parquet --auto-split 0.7 --write-split-config configs\baseline_split_v1.yaml
 ```
+
+- **`--out-model`:** after fit, write the sklearn **`Pipeline`** to **`.joblib`** for **`export_phase3_bundle.py`**.
 
 **EA:** unchanged — no MetaEditor compile for Week 3.
 
