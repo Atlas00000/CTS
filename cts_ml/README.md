@@ -278,6 +278,30 @@ python scripts\smoke_phase4_api.py
 
 ---
 
+## Phase 4 Week 2 (score endpoint hardening)
+
+**Endpoints:** **`GET /features`** (required JSON keys for **`POST /score`**), **`POST /score`** returns **`score`**, **`threshold`**, **`would_allow`**, **`inference_ms`**. Missing feature keys → **422** with **`missing_keys`**. Scoring over budget → **504** (`CTS_SCORE_TIMEOUT_MS`, default **200**).
+
+**Week 2 tests (no uvicorn):**
+
+```powershell
+cd cts_ml
+python scripts\test_phase4_week2.py
+```
+
+**Live client (uvicorn must be running):**
+
+```powershell
+python -m uvicorn phase4_api.app:app --host 127.0.0.1 --port 8008
+python scripts\phase4_score_client.py --from-parquet data\cts_dataset_7y_2026-05-15.parquet --row-index 0 --timeout-ms 500
+```
+
+**OpenAPI:** `http://127.0.0.1:8008/docs` while the server is up.
+
+**EA / MetaEditor:** still **no compile** for Week 2.
+
+---
+
 ## Phase 3 Week 6 (optional — regime helper)
 
 **Rule tag:** `scripts/regime_rules.py` — **`regime_rule_v1`** ∈ {`trend_long`, `trend_short`, `chop`} from logged EMA/MACD/bias only.

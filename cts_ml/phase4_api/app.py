@@ -1,26 +1,33 @@
-"""Phase 4 Week 1 — FastAPI: GET /health, POST /score (localhost only)."""
+"""Phase 4 — FastAPI: GET /health, GET /features, POST /score (localhost only)."""
 
 from __future__ import annotations
 
+import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any
 
 from dotenv import load_dotenv
-from fastapi import Body, FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from phase4_api.errors import MissingFeaturesError
 from phase4_api.model_loader import load_bundle
-from phase4_api.schemas import HealthOut, ScoreOut
+from phase4_api.schemas import ErrorDetail, FeaturesOut, HealthOut, ScoreOut
 from phase4_api.scorer import score_positive_proba
 
 _DIR = Path(__file__).resolve().parent
 _CTS_ML_DIR = _DIR.parent
 
-# phase4_api/.env (optional); env vars can also be set in the shell.
 load_dotenv(_DIR / ".env", override=False)
+
+_score_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="cts_score")
 
 
 class Settings(BaseSettings):
@@ -35,6 +42,7 @@ class Settings(BaseSettings):
     CTS_API_HOST: str = "127.0.0.1"
     CTS_API_PORT: int = 8008
     CTS_MANIFEST_PATH: Path | None = None
+    CTS_SCORE_TIMEOUT_MS: int = 200
 
 
 def _resolve_under_cts_ml(p: Path) -> Path:
@@ -51,6 +59,21 @@ class AppState:
 
 
 state = AppState()
+
+
+def _require_model() -> tuple[Settings, Any, dict[str, Any]]:
+    if state.settings is None:
+        raise HTTPException(status_code=503, detail=state.load_error or "Invalid configuration")
+    if state.clf is None or state.manifest is None:
+        raise HTTPException(
+            status_code=503,
+            detail=state.load_error or "Model not loaded",
+        )
+    return state.settings, state.clf, state.manifest
+
+
+def _run_score(clf: Any, manifest: dict[str, Any], body: dict[str, Any]) -> float:
+    return score_positive_proba(clf, manifest, body)
 
 
 @asynccontextmanager
@@ -74,19 +97,43 @@ async def lifespan(app: FastAPI):
         )
         state.clf, state.manifest = load_bundle(model_path=model_p, manifest_path=man_p)
         state.load_error = None
-    except Exception as e:  # noqa: BLE001 — surface any startup failure in /health
+    except Exception as e:  # noqa: BLE001
         state.clf = None
         state.manifest = None
         state.load_error = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
     yield
+    _score_pool.shutdown(wait=False, cancel_futures=True)
 
 
 app = FastAPI(
     title="CTS Phase 4 scorer",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
     description="Local y_has_fill model endpoint for EA shadow/filter (AI_integration.md §6).",
 )
+
+
+@app.exception_handler(MissingFeaturesError)
+async def missing_features_handler(_request: Request, exc: MissingFeaturesError) -> JSONResponse:
+    return JSONResponse(
+        status_code=422,
+        content=ErrorDetail(
+            error="missing_feature_keys",
+            missing_keys=exc.missing_keys,
+        ).model_dump(),
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_handler(_request: Request, exc: RequestValidationError) -> JSONResponse:
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": "request_validation_failed",
+            "missing_keys": None,
+            "detail": exc.errors(),
+        },
+    )
 
 
 @app.get("/health", response_model=HealthOut)
@@ -122,33 +169,42 @@ def health() -> HealthOut:
     )
 
 
+@app.get("/features", response_model=FeaturesOut)
+def features() -> FeaturesOut:
+    _settings, _clf, manifest = _require_model()
+    return FeaturesOut(
+        feature_columns=list(manifest["feature_columns"]),
+        numeric_columns=list(manifest.get("numeric_columns", [])),
+        boolean_columns=list(manifest.get("boolean_columns", [])),
+        categorical_columns=list(manifest.get("categorical_columns", [])),
+        label_column=manifest.get("label_column"),
+    )
+
+
 @app.post("/score", response_model=ScoreOut)
 def score(body: Annotated[dict[str, Any], Body(...)]) -> ScoreOut:
-    if state.settings is None:
-        raise HTTPException(status_code=503, detail=state.load_error or "Invalid configuration")
-    if state.clf is None or state.manifest is None:
-        raise HTTPException(
-            status_code=503,
-            detail=state.load_error or "Model not loaded",
-        )
-    s = state.settings
+    s, clf, manifest = _require_model()
+    timeout_s = max(0.001, float(s.CTS_SCORE_TIMEOUT_MS) / 1000.0)
+    t0 = time.perf_counter()
+    fut = _score_pool.submit(_run_score, clf, manifest, body)
     try:
-        p = score_positive_proba(state.clf, state.manifest, body)
-    except ValueError as e:
-        msg = str(e)
-        if msg.startswith("missing_keys:"):
-            keys = msg.split(":", 1)[1].split(",") if ":" in msg else []
-            keys = [k for k in keys if k]
-            raise HTTPException(
-                status_code=422,
-                detail={"error": "missing feature keys", "missing_keys": keys},
-            ) from e
-        raise HTTPException(status_code=422, detail=str(e)) from e
+        p = fut.result(timeout=timeout_s)
+    except FuturesTimeoutError:
+        fut.cancel()
+        raise HTTPException(
+            status_code=504,
+            detail=f"score_timeout: exceeded {s.CTS_SCORE_TIMEOUT_MS} ms server budget",
+        ) from None
+    except MissingFeaturesError:
+        raise
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"score_error: {type(e).__name__}: {e}") from e
 
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
     thr = float(s.CTS_AI_THRESHOLD)
-    return ScoreOut(score=p, threshold=thr, would_allow=p >= thr)
-
-
-# OpenAPI-friendly error shape for 422 (FastAPI default) remains; 503 uses detail string or dict.
+    return ScoreOut(
+        score=p,
+        threshold=thr,
+        would_allow=p >= thr,
+        inference_ms=round(elapsed_ms, 3),
+    )

@@ -7,12 +7,19 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from phase4_api.errors import MissingFeaturesError
+
+
+def missing_feature_keys(row: dict[str, Any], manifest: dict[str, Any]) -> list[str]:
+    cols: list[str] = list(manifest["feature_columns"])
+    return [c for c in cols if c not in row]
+
 
 def features_to_frame(row: dict[str, Any], manifest: dict[str, Any]) -> pd.DataFrame:
-    cols: list[str] = list(manifest["feature_columns"])
-    miss = [c for c in cols if c not in row]
+    miss = missing_feature_keys(row, manifest)
     if miss:
-        raise ValueError(f"missing_keys:{','.join(miss)}")
+        raise MissingFeaturesError(miss)
+    cols: list[str] = list(manifest["feature_columns"])
     out = pd.DataFrame([{c: row[c] for c in cols}])
     for c in manifest.get("boolean_columns", []):
         out[c] = out[c].astype(bool).astype(np.int8)

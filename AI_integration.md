@@ -271,10 +271,9 @@ Use this as a **sequenced backlog** under §6.5; each week ends with a concrete 
 
 **Week 2 — Score endpoint**
 
-- **`POST /score`**: body = JSON object whose keys are **`manifest.json` → `feature_columns`** (same names/types as training Parquet row); response = `{ "score": <float 0..1>, "allow": <bool> }` using **positive-class probability** and optional threshold from env.
-- Validate missing keys → **422** with list of missing feature names.
-- Internal **timeout** budget (e.g. 50 ms CPU work cap per request — document; true wall-clock async timeout optional v1).
-- Smoke: `curl` or **`inference_score_row.py`**-style script calling `/score` with one row from **`cts_dataset_*.parquet`**.
+- **Implemented (repo):** **`GET /features`**; **`POST /score`** returns **`score`**, **`threshold`**, **`would_allow`**, **`inference_ms`**; **422** + **`missing_keys`**; **504** on **`CTS_SCORE_TIMEOUT_MS`** (default **200**); **`scripts/test_phase4_week2.py`** (TestClient); **`scripts/phase4_score_client.py`** (httpx vs live uvicorn).
+- Body keys = **`manifest.json` → `feature_columns`** (same types as training Parquet).
+- EA **`WebRequest`** timeout should exceed server budget (e.g. **500 ms** client vs **200 ms** server).
 
 **Week 3 — Shadow in EA**
 
@@ -473,4 +472,5 @@ Exact column order for `CTS_SIGNALS_*.csv` (row 1 = header):
 | 1.19 | 2026-05-15 | **Execution CSV v2** + **`entry_price`**: `CTS_LogCsv.mqh` / `CTS.mq5` **v1.07**; `001` + **`003_cts_orders_entry_price.sql`**; `load_csv_to_postgres.py` (v1/v2 headers); `build_dataset.py` **`fill_entry_price`**; `labeling.md` §5.B; `cts_ml/README` + **§11.4** execution headers; **§4.5** Phase 2 Week 3 row + **§5.5** Phase 3 Weeks 1–2 rows. |
 | 1.20 | 2026-05-15 | **`build_dataset.py`** dedupe join (EXISTS + LATERAL latest order); **`configs/.env`** workflow note in **`.env.example`**. |
 | 1.22 | 2026-05-15 | **Phase 4 Week 1**: `cts_ml/phase4_api/` FastAPI **`/health`** + **`/score`**; **`requirements_phase4.txt`**, **`.env.example`**, **`scripts/smoke_phase4_api.py`**; README Phase 4 runbook; **§6.5.1** Week 1 bullets; **`.gitignore`** `phase4_api/.env`. |
+| 1.23 | 2026-05-15 | **Phase 4 Week 2**: **`GET /features`**, **`inference_ms`**, **422/504**, **`CTS_SCORE_TIMEOUT_MS`**; **`test_phase4_week2.py`**, **`phase4_score_client.py`**; README Week 2; **§6.5.1** Week 2 bullets. |
 

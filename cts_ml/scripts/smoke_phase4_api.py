@@ -62,7 +62,13 @@ def main() -> int:
         body = json.loads(json.dumps(body, default=str))
         r = client.post("/score", json=body)
         print("POST /score", r.status_code, r.text)
-        return 0 if r.status_code == 200 else 1
+        if r.status_code != 200:
+            return 1
+        sj = r.json()
+        if "inference_ms" not in sj:
+            print("missing inference_ms in /score response", file=sys.stderr)
+            return 1
+        return 0
 
 
 if __name__ == "__main__":
