@@ -4,13 +4,14 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026"
 #property link      ""
-#property version   "1.05"
+#property version   "1.08"
 
 #include <Trade/Trade.mqh>
 
 #include "Include/CTS_Config.mqh"
 #include "Include/CTS_Log.mqh"
 #include "Include/CTS_LogCsv.mqh"
+#include "Include/CTS_AiGate.mqh"
 #include "Include/CTS_State.mqh"
 #include "Include/CTS_Risk.mqh"
 #include "Include/CTS_Signals.mqh"
@@ -62,8 +63,16 @@ input string            InpLogCsvSubdir        = "CTS_logs";
 input bool              InpLogSignals          = true;   // Week 2+: signal rows
 input bool              InpLogOrders           = false;  // Week 3+: execution rows
 input bool              InpLogInTester         = false;  // Week 3: allow CSV in Strategy Tester (else no file I/O)
-input int               InpLogTesterMaxRows    = 50000;  // Week 3: tester row cap (signals+executions); 0 = unlimited
+input int               InpLogTesterMaxRows    = 0;       // Tester row cap (signals+executions); 0 = unlimited (full long backtests); set >0 for optimization disk safety
 input string            InpLogTesterSubdir     = "CTS_logs_tester";
+
+input group "AI gate (Phase 4)"
+input bool              InpUseAiGate            = false;
+input bool              InpAiShadowMode         = true;   // true = log only; false = filter (Week 4 policy)
+input bool              InpUseAiGateInTester    = false;  // no WebRequest in tester by default
+input string            InpAiEndpoint           = "http://127.0.0.1:8008/score";
+input int               InpAiTimeoutMs          = 500;
+input double            InpAiThreshold          = 0.65;   // logged; server uses CTS_AI_THRESHOLD
 
 input group "Debug"
 input bool              InpVerboseLog          = true;
@@ -180,6 +189,20 @@ bool CTS_ValidateInputs(string &err)
          return false;
         }
      }
+   if(InpUseAiGate)
+     {
+      if(InpAiTimeoutMs < 50)
+        {
+         err = "AiGate timeout must be >= 50 ms";
+         return false;
+        }
+      string ae = "";
+      if(!CTS_AiGate_ValidateEndpoint(InpAiEndpoint, ae))
+        {
+         err = ae;
+         return false;
+        }
+     }
    return true;
   }
 
@@ -247,7 +270,7 @@ bool CTS_TryOpen(const bool is_long, const CTSPriceBuf &buf, const string sym, c
       return false;
 
    string exec_err = "";
-   if(!CTS_LogCsv_AppendExecutionRow(InpLogCsvEnable, InpLogOrders, sym, tf, signal_id, is_long, lots, sl, tp,
+   if(!CTS_LogCsv_AppendExecutionRow(InpLogCsvEnable, InpLogOrders, sym, tf, signal_id, is_long, lots, entry, sl, tp,
                                      send_retcode, deal_ticket, InpVerboseLog, exec_err))
      {
       if(StringLen(exec_err) > 0)
@@ -290,6 +313,8 @@ int OnInit()
      }
 
    PrintFormat("CTS: initialized sym=%s tf=%s", sym, EnumToString(tf));
+   if(InpUseAiGate)
+      Print("CTS AiGate: enable Tools -> Options -> Expert Advisors -> Allow WebRequest for listed URL: http://127.0.0.1:8008");
    return INIT_SUCCEEDED;
   }
 
@@ -350,6 +375,12 @@ void OnTick()
    if(sig_long)
      {
       CTS_LogV(InpVerboseLog, "CTS: LONG signal");
+      string ai_log = "";
+      if(!CTS_AiGate_HandleBeforeOpen(InpUseAiGate, InpUseAiGateInTester, InpAiShadowMode,
+                                      InpAiEndpoint, InpAiTimeoutMs, InpAiThreshold,
+                                      sym, tf, buf, bias_long, bias_short, sig_long, sig_short,
+                                      signal_id, true, InpVerboseLog, ai_log))
+         return;
       CTS_TryOpen(true, buf, sym, tf, signal_id);
       return;
      }
@@ -357,6 +388,12 @@ void OnTick()
    if(sig_short)
      {
       CTS_LogV(InpVerboseLog, "CTS: SHORT signal");
+      string ai_log = "";
+      if(!CTS_AiGate_HandleBeforeOpen(InpUseAiGate, InpUseAiGateInTester, InpAiShadowMode,
+                                      InpAiEndpoint, InpAiTimeoutMs, InpAiThreshold,
+                                      sym, tf, buf, bias_long, bias_short, sig_long, sig_short,
+                                      signal_id, false, InpVerboseLog, ai_log))
+         return;
       CTS_TryOpen(false, buf, sym, tf, signal_id);
       return;
      }

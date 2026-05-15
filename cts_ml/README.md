@@ -302,6 +302,46 @@ python scripts\phase4_score_client.py --from-parquet data\cts_dataset_7y_2026-05
 
 ---
 
+## Phase 4 Week 3 (EA shadow — compile & test)
+
+**Code:** `Include/CTS_AiGate.mqh` + **`CTS.mq5` v1.08** — before **`CTS_TryOpen`**, POST feature JSON to **`InpAiEndpoint`** (default `http://127.0.0.1:8008/score`).
+
+| Input | Default | Meaning |
+|-------|---------|---------|
+| **`InpUseAiGate`** | `false` | Master switch |
+| **`InpAiShadowMode`** | `true` | **Shadow:** log `score` / `threshold` / `would_allow`; **do not** block trades |
+| **`InpUseAiGateInTester`** | `false` | No HTTP in Strategy Tester (recommended) |
+| **`InpAiEndpoint`** | `http://127.0.0.1:8008/score` | Must be allow-listed in MT5 (see below) |
+| **`InpAiTimeoutMs`** | `500` | WebRequest timeout (ms) |
+| **`InpAiThreshold`** | `0.65` | For journal; server uses **`CTS_AI_THRESHOLD`** |
+
+### One-time MT5 setup (required for WebRequest)
+
+1. **Tools → Options → Expert Advisors**
+2. Check **Allow algorithmic trading** and **Allow WebRequest for listed URL**
+3. Add: **`http://127.0.0.1:8008`** (or your host/port)
+4. Restart terminal if prompted
+
+### Compile
+
+1. Open **`CTS.mq5`** in MetaEditor → **Compile** (F7) — expect **0 errors**.
+2. Attach to chart (e.g. EURUSD M5). Leave **`InpUseAiGate = false`** first to confirm baseline trades unchanged.
+
+### Shadow test (visual)
+
+1. Start API (from `cts_ml/`):  
+   `python -m uvicorn phase4_api.app:app --host 127.0.0.1 --port 8008`
+2. On chart EA inputs: **`InpUseAiGate = true`**, **`InpAiShadowMode = true`**, **`InpUseAiGateInTester = false`**
+3. Wait for a signal bar. **Experts** tab should show lines like:  
+   `CTS AiGate: signal_id=... score=0.xxxx threshold=0.65 would_allow=... shadow=true`
+4. Trades should still open as without AI (shadow does not block).
+
+### Filter note
+
+**`InpAiShadowMode = false`** enables block-when-`would_allow=false` (Week 4 policy). Default stays **shadow** for rollout.
+
+---
+
 ## Phase 3 Week 6 (optional — regime helper)
 
 **Rule tag:** `scripts/regime_rules.py` — **`regime_rule_v1`** ∈ {`trend_long`, `trend_short`, `chop`} from logged EMA/MACD/bias only.

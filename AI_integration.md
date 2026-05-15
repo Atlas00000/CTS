@@ -277,10 +277,11 @@ Use this as a **sequenced backlog** under §6.5; each week ends with a concrete 
 
 **Week 3 — Shadow in EA**
 
-- Add **`Include/CTS_AiGate.mqh`** (+ `CTS.mq5` include): build numeric/bool/cat feature dict from **same buffers** as logging (must match training schema).
-- Inputs: **`InpUseAiGate`**, **`InpAiEndpoint`**, **`InpAiTimeoutMs`**, **`InpAiThreshold`**, **`InpAiShadowMode`** (names can vary; behaviour per §6.3).
-- **`WebRequest`** POST to localhost; on success log **score** (journal or optional CSV column later); **never** change `CTS_TryOpen` outcome when shadow mode on.
-- Verify: with gate **off** vs **shadow on**, trade list / deal count **unchanged** on visual test.
+- **Implemented (repo):** **`Include/CTS_AiGate.mqh`**, **`CTS.mq5` v1.08** — feature JSON matches **`manifest.json` `feature_columns`**; **`CTS_AiGate_HandleBeforeOpen`** before **`CTS_TryOpen`**.
+- Inputs: **`InpUseAiGate`**, **`InpAiShadowMode`** (default **true**), **`InpUseAiGateInTester`** (default **false**), **`InpAiEndpoint`**, **`InpAiTimeoutMs`**, **`InpAiThreshold`**.
+- **`WebRequest`** POST to **`/score`**; journal logs **`score`**, **`threshold`**, **`would_allow`**, **`shadow=true`**.
+- MT5: allow-list **`http://127.0.0.1:8008`** under Expert Advisors. Runbook: **`cts_ml/README.md`** Phase 4 Week 3.
+- Verify: **`InpUseAiGate=false`** vs **shadow on** — same fills on visual; Experts tab shows AI lines when gate on.
 
 **Week 4 — Filter + hardening**
 
@@ -473,4 +474,5 @@ Exact column order for `CTS_SIGNALS_*.csv` (row 1 = header):
 | 1.20 | 2026-05-15 | **`build_dataset.py`** dedupe join (EXISTS + LATERAL latest order); **`configs/.env`** workflow note in **`.env.example`**. |
 | 1.22 | 2026-05-15 | **Phase 4 Week 1**: `cts_ml/phase4_api/` FastAPI **`/health`** + **`/score`**; **`requirements_phase4.txt`**, **`.env.example`**, **`scripts/smoke_phase4_api.py`**; README Phase 4 runbook; **§6.5.1** Week 1 bullets; **`.gitignore`** `phase4_api/.env`. |
 | 1.23 | 2026-05-15 | **Phase 4 Week 2**: **`GET /features`**, **`inference_ms`**, **422/504**, **`CTS_SCORE_TIMEOUT_MS`**; **`test_phase4_week2.py`**, **`phase4_score_client.py`**; README Week 2; **§6.5.1** Week 2 bullets. |
+| 1.24 | 2026-05-15 | **Phase 4 Week 3**: **`CTS_AiGate.mqh`**, **`CTS.mq5` v1.08** shadow **`WebRequest`**; README Week 3 compile/test; **§6.5.1** Week 3. |
 
