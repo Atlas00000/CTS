@@ -6,6 +6,7 @@ Reads POSTGRES_DSN from the environment or from --env-file (configs/.env).
 Default rows: would_trade = true and y_has_fill = EXISTS(order) per cts_ml/labeling.md §5.C.
 
 Outputs Parquet (default) or CSV under cts_ml/data/ (gitignored). Does not touch the EA.
+Join adds y_has_fill and fill_entry_price (from cts_orders.entry_price; null for no fill or legacy execution CSV v1).
 """
 
 from __future__ import annotations
@@ -51,9 +52,16 @@ SELECT
   s.skip_reason,
   s.would_trade,
   s.signal_id,
-  (o.signal_id IS NOT NULL) AS y_has_fill
+  EXISTS (SELECT 1 FROM cts_orders ox WHERE ox.signal_id = s.signal_id) AS y_has_fill,
+  o.entry_price AS fill_entry_price
 FROM cts_signals s
-LEFT JOIN cts_orders o ON o.signal_id = s.signal_id
+LEFT JOIN LATERAL (
+  SELECT o2.entry_price
+  FROM cts_orders o2
+  WHERE o2.signal_id = s.signal_id
+  ORDER BY o2.ts_gmt DESC, o2.id DESC
+  LIMIT 1
+) o ON true
 """
 
 
@@ -93,9 +101,20 @@ def run_qc(df: pd.DataFrame, *, verbose: bool) -> list[str]:
         issues.append("dataset is empty after query")
         return issues
 
-    null_cols = [c for c in df.columns if df[c].isna().any()]
+    allow_na = {"fill_entry_price"}  # LEFT JOIN; null when no fill or legacy order row
+    null_cols = [c for c in df.columns if c not in allow_na and df[c].isna().any()]
     if null_cols:
         issues.append(f"null values in columns: {null_cols}")
+
+    if "fill_entry_price" in df.columns and "y_has_fill" in df.columns:
+        n_legacy = int((df["y_has_fill"] & df["fill_entry_price"].isna()).sum())
+        if n_legacy:
+            # Not a strict failure: common for 7y backtests logged before execution CSV v2.
+            print(
+                f"QC info: y_has_fill with null fill_entry_price: {n_legacy} rows "
+                "(CTS_EXECUTIONS schema v1 / DB without entry_price)",
+                file=sys.stderr,
+            )
 
     for c in ("open1", "high1", "low1", "close1", "atr1", "spread_points"):
         if c in df.columns and (df[c] < 0).any():
